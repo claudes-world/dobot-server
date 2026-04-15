@@ -96,6 +96,14 @@ export function createNarratorHandler(db: Database.Database) {
 
       console.log(`narrator: job ${jobId} complete — stop_reason=${envelope.stop_reason}, output written to ${outPath}`);
 
+    } catch (err: unknown) {
+      // Update job row to failed — any unhandled throw reaches here
+      try {
+        db.prepare(`
+          UPDATE jobs SET status = 'failed', completed_at = ?, error = ? WHERE id = ?
+        `).run(Date.now(), String(err), jobId);
+      } catch { /* DB may be closing */ }
+      throw err;  // re-throw so router crash boundary logs it
     } finally {
       if (sysTmpFile) {
         try { await fs.unlink(sysTmpFile); } catch { /* already gone */ }
@@ -140,7 +148,17 @@ async function spawnNarrator(opts: SpawnOptions): Promise<SpawnResult> {
         killSignal: 'SIGKILL',
       });
 
-      const envelope: ClaudeEnvelope = JSON.parse(proc.stdout);
+      let envelope: ClaudeEnvelope;
+      try {
+        const parsed = JSON.parse(proc.stdout) as Record<string, unknown>;
+        // Runtime shape check — ensure critical fields are present
+        if (typeof parsed['is_error'] !== 'boolean' || typeof parsed['result'] !== 'string') {
+          throw new Error(`Malformed Claude envelope — missing is_error or result. stdout: ${proc.stdout.slice(0, 200)}`);
+        }
+        envelope = parsed as unknown as ClaudeEnvelope;
+      } catch (parseErr) {
+        throw new Error(`Failed to parse Claude output: ${String(parseErr)}. stdout: ${proc.stdout.slice(0, 200)}`);
+      }
       return { envelope, retried };
 
     } catch (err: unknown) {
