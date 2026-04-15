@@ -54,4 +54,22 @@ describe('buildSubprocessEnv', () => {
     const result = buildSubprocessEnv(base, extra);
     expect(result['PATH']).toBe('/custom/bin');
   });
+
+  it('throws if extra contains a TELEGRAM_* key', () => {
+    expect(() =>
+      buildSubprocessEnv({}, { TELEGRAM_BOT_TOKEN: 'secret' }),
+    ).toThrow(/forbidden key/);
+  });
+
+  it('throws if extra contains an ANTHROPIC_* key', () => {
+    expect(() =>
+      buildSubprocessEnv({}, { ANTHROPIC_API_KEY: 'sk-ant-secret' }),
+    ).toThrow(/forbidden key/);
+  });
+
+  it('throws if extra contains a NARRATOR_* key', () => {
+    expect(() =>
+      buildSubprocessEnv({}, { NARRATOR_ALLOWED_USER_IDS: '123' }),
+    ).toThrow(/forbidden key/);
+  });
 });
