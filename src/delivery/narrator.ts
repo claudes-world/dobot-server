@@ -50,7 +50,7 @@ export async function deliverNarration(opts: DeliveryOptions): Promise<void> {
   const deepLink: string = `https://cpc.claude.do/#file=${encodeURIComponent(mdPath)}`;
 
   // 3. Invoke md-speak --no-describe to generate audio
-  const mp3Path = mdPath.replace('.narration.md', '.mp3');
+  const mp3Path = mdPath.replace(/\.md$/, '.mp3');
   let ttsChars = 0;
   let ttsDurationMs = 0;
   let audioGenerated = false;

@@ -94,6 +94,13 @@ export function createNarratorHandler(db: Database.Database) {
 
       console.log(`narrator: job ${jobId} rewrite done — stop_reason=${stopReason}, starting delivery`);
 
+      // Guard: check job is still active before invoking paid TTS
+      const activeRow = db.prepare(`SELECT status FROM jobs WHERE id = ?`).get(jobId) as { status: string } | undefined;
+      if (!activeRow || activeRow.status !== 'active') {
+        console.warn(`narrator: job ${jobId} no longer active before delivery — skipping`);
+        return;
+      }
+
       // 7. Deliver (writes story file, runs md-speak, sends audio, updates output_path/tts_chars/tts_usd)
       await deliverNarration({
         jobId,
