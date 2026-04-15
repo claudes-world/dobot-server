@@ -5,6 +5,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import Database from 'better-sqlite3';
 import { config } from '../config.js';
+import { buildSubprocessEnv } from '../lib/claude-subprocess.js';
 
 export interface DeliveryOptions {
   jobId: string;
@@ -59,12 +60,10 @@ export async function deliverNarration(opts: DeliveryOptions): Promise<void> {
   try {
     await execa('md-speak', ['--no-describe', mdPath], {
       extendEnv: false,
-      env: {
-        PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
-        HOME: process.env['HOME'] ?? '/home/claude',
-        ...(process.env['GOOGLE_APPLICATION_CREDENTIALS'] ? { GOOGLE_APPLICATION_CREDENTIALS: process.env['GOOGLE_APPLICATION_CREDENTIALS'] } : {}),
-        ...(process.env['GOOGLE_CLOUD_PROJECT'] ? { GOOGLE_CLOUD_PROJECT: process.env['GOOGLE_CLOUD_PROJECT'] } : {}),
-      },
+      env: buildSubprocessEnv(process.env, {
+        ...(process.env['GOOGLE_APPLICATION_CREDENTIALS'] ? { GOOGLE_APPLICATION_CREDENTIALS: process.env['GOOGLE_APPLICATION_CREDENTIALS']! } : {}),
+        ...(process.env['GOOGLE_CLOUD_PROJECT'] ? { GOOGLE_CLOUD_PROJECT: process.env['GOOGLE_CLOUD_PROJECT']! } : {}),
+      }),
       timeout: config.narrator.mdSpeakTimeout,
       cleanup: true,
       killSignal: 'SIGKILL',
@@ -105,13 +104,11 @@ export async function deliverNarration(opts: DeliveryOptions): Promise<void> {
       try {
         const pubResult = await execa('publish-shared', ['--tmp', 'private', mp3Path], {
           extendEnv: false,
-          env: {
-            PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
-            HOME: process.env['HOME'] ?? '/home/claude',
-            ...(process.env['GOOGLE_APPLICATION_CREDENTIALS'] ? { GOOGLE_APPLICATION_CREDENTIALS: process.env['GOOGLE_APPLICATION_CREDENTIALS'] } : {}),
-            ...(process.env['GOOGLE_CLOUD_PROJECT'] ? { GOOGLE_CLOUD_PROJECT: process.env['GOOGLE_CLOUD_PROJECT'] } : {}),
-            ...(process.env['SHARED_PRIVATE_BASE_URL'] ? { SHARED_PRIVATE_BASE_URL: process.env['SHARED_PRIVATE_BASE_URL'] } : {}),
-          },
+          env: buildSubprocessEnv(process.env, {
+            ...(process.env['GOOGLE_APPLICATION_CREDENTIALS'] ? { GOOGLE_APPLICATION_CREDENTIALS: process.env['GOOGLE_APPLICATION_CREDENTIALS']! } : {}),
+            ...(process.env['GOOGLE_CLOUD_PROJECT'] ? { GOOGLE_CLOUD_PROJECT: process.env['GOOGLE_CLOUD_PROJECT']! } : {}),
+            ...(process.env['SHARED_PRIVATE_BASE_URL'] ? { SHARED_PRIVATE_BASE_URL: process.env['SHARED_PRIVATE_BASE_URL']! } : {}),
+          }),
           timeout: 60000,
         });
         // publish-shared outputs multi-line stdout; extract the URL: line
