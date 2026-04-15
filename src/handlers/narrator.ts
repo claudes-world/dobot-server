@@ -129,6 +129,7 @@ async function spawnNarrator(opts: SpawnOptions): Promise<SpawnResult> {
         '--model', opts.model,
       ], {
         input: opts.sourceText,
+        extendEnv: false,
         env: {
           PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
           HOME: process.env['HOME'] ?? '/home/claude',
