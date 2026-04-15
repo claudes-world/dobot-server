@@ -18,11 +18,17 @@ async function main(): Promise<void> {
     },
   });
 
-  // Graceful shutdown — await bot stop before closing DB so in-flight handlers
-  // aren't left with a closed database under their feet.
-  const shutdown = async (): Promise<void> => {
-    await narratorBot.stop();
-    db.close();
+  // Graceful shutdown — idempotent guard ensures concurrent SIGINT+SIGTERM
+  // (e.g. double Ctrl+C) only runs stop/close once.
+  let shutdownPromise: Promise<void> | null = null;
+
+  const shutdown = (): Promise<void> => {
+    if (shutdownPromise) return shutdownPromise;
+    shutdownPromise = (async () => {
+      await narratorBot.stop();
+      db.close();
+    })();
+    return shutdownPromise;
   };
   process.once('SIGINT', () => { shutdown().catch(console.error); });
   process.once('SIGTERM', () => { shutdown().catch(console.error); });
