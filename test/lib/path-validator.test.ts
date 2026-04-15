@@ -81,4 +81,9 @@ describe('validateFilePath', () => {
   it('7. nonexistent path — throws', () => {
     expect(() => validateFilePath('/home/claude/claudes-world/nonexistent-99999.md')).toThrow();
   });
+
+  it('8. path outside allowed prefix (direct, no symlink) — throws with prefix error', () => {
+    // /etc/hostname is a real file outside all allowed prefixes
+    expect(() => validateFilePath('/etc/hostname')).toThrow(/allowed prefix/);
+  });
 });
