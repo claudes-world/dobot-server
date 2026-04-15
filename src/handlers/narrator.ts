@@ -5,6 +5,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { config } from '../config.js';
+import { getTracer, withSpan } from '../lib/otel.js';
 import { deliverNarration } from '../delivery/narrator.js';
 
 const SYSTEM_PROMPT_PARTS = [
@@ -27,6 +28,8 @@ interface ClaudeEnvelope {
     output_tokens: number;
   };
 }
+
+const tracer = getTracer('narrator');
 
 export function createNarratorHandler(db: Database.Database) {
   return async function narratorHandler(ctx: Context): Promise<void> {
@@ -63,13 +66,30 @@ export function createNarratorHandler(db: Database.Database) {
       const parts = await Promise.all(SYSTEM_PROMPT_PARTS.map(p => fs.readFile(p, 'utf8')));
       await fs.writeFile(sysTmpFile, parts.join('\n\n---\n\n'));
 
-      // 4. Spawn narrator subprocess
-      const result = await spawnNarrator({
-        runScript: config.narrator.agentRunScript,
-        model: config.narrator.rewriteModel,
-        sysFile: sysTmpFile,
-        sourceText,
-        timeout: config.narrator.claudeTimeout,
+      // 4. Spawn narrator subprocess — wrapped in OTEL span
+      const result = await withSpan(tracer, 'rewrite.sonnet', {
+        job_id: jobId,
+        chat_id: String(ctx.chat?.id ?? userId),
+        user_id: String(userId),
+        handler_name: 'narrator',
+        claude_model: config.narrator.rewriteModel,
+      }, async (span) => {
+        const r = await spawnNarrator({
+          runScript: config.narrator.agentRunScript,
+          model: config.narrator.rewriteModel,
+          sysFile: sysTmpFile!,
+          sourceText,
+          timeout: config.narrator.claudeTimeout,
+        });
+        span.setAttribute('claude_stop_reason', r.envelope.stop_reason ?? 'unknown');
+        const usage = (r.envelope as unknown as Record<string, unknown>)['usage'] as
+          | { input_tokens?: number; output_tokens?: number }
+          | undefined;
+        if (usage) {
+          span.setAttribute('claude_tokens_in', usage.input_tokens ?? 0);
+          span.setAttribute('claude_tokens_out', usage.output_tokens ?? 0);
+        }
+        return r;
       });
 
       const envelope = result.envelope;
