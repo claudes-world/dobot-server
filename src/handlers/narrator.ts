@@ -149,7 +149,7 @@ async function spawnNarrator(opts: SpawnOptions): Promise<SpawnResult> {
         '--output-format', 'json',
         '--append-system-prompt-file', opts.sysFile,
         '--model', opts.model,
-        '--disallowedTools', 'Read,Grep',  // prevent prompt injection triggering file reads
+        '--allowedTools', '',  // zero-tool allowlist — narrator rewrite needs no tools; empty allowlist > denylist
       ], {
         input: opts.sourceText,
         extendEnv: false,
