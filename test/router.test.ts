@@ -76,15 +76,17 @@ describe('router crash boundary', () => {
     // Re-import router with the mock active
     const { registerHandlers: registerHandlersMocked } = await import('../src/router.js?mock=otel');
 
-    const bot = makeFakeBot();
-    const narrator = vi.fn().mockRejectedValue(new Error('otel-test'));
-    registerHandlersMocked(bot, { narrator });
-    await bot.fire(makeCtx());
+    try {
+      const bot = makeFakeBot();
+      const narrator = vi.fn().mockRejectedValue(new Error('otel-test'));
+      registerHandlersMocked(bot, { narrator });
+      await bot.fire(makeCtx());
 
-    // span.end() must be called via finally even on handler throw
-    expect(mockSpan.end).toHaveBeenCalled();
-
-    vi.doUnmock('../src/lib/otel.js');
+      // span.end() must be called via finally even on handler throw
+      expect(mockSpan.end).toHaveBeenCalled();
+    } finally {
+      vi.doUnmock('../src/lib/otel.js');
+    }
   });
 
   it('catches ctx.reply throwing', async () => {
