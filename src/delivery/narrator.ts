@@ -6,9 +6,11 @@ import path from 'node:path';
 import Database from 'better-sqlite3';
 import { config } from '../config.js';
 import { buildSubprocessEnv } from '../lib/claude-subprocess.js';
+import { recordSpend } from '../lib/rate-limit.js';
 
 export interface DeliveryOptions {
   jobId: string;
+  userId: number;
   narrative: string;
   stopReason: string;
   ctx: Context;
@@ -16,7 +18,7 @@ export interface DeliveryOptions {
 }
 
 export async function deliverNarration(opts: DeliveryOptions): Promise<void> {
-  const { jobId, narrative, stopReason, ctx, db } = opts;
+  const { jobId, userId, narrative, stopReason, ctx, db } = opts;
 
   // 1. Build story file path
   const now = new Date();
@@ -148,6 +150,13 @@ export async function deliverNarration(opts: DeliveryOptions): Promise<void> {
     `).run(Date.now(), mdPath, ttsChars, ttsUsd, jobId);
     if ((result as { changes: number }).changes === 0) {
       console.warn(`narrator: job ${jobId} status was not active at completion — skipping completed update`);
+    } else if (ttsUsd > 0) {
+      // Record spend for daily cap enforcement — only on successful job completion
+      try {
+        recordSpend(db, userId, ttsUsd);
+      } catch (spendErr) {
+        console.error('narrator: recordSpend failed (non-fatal):', spendErr);
+      }
     }
   } catch (dbErr) {
     console.error('narrator: DB update failed after delivery:', dbErr);

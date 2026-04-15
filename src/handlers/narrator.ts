@@ -8,6 +8,7 @@ import { config } from '../config.js';
 import { getTracer, withSpan } from '../lib/otel.js';
 import { deliverNarration } from '../delivery/narrator.js';
 import { buildSubprocessEnv } from '../lib/claude-subprocess.js';
+import { checkAndRecordRate } from '../lib/rate-limit.js';
 
 const SYSTEM_PROMPT_PARTS = [
   '/home/claude/claudes-world/agents/narrator/.claude/output-styles/narrator.md',
@@ -47,6 +48,15 @@ export function createNarratorHandler(db: Database.Database) {
     const wordCount = sourceText.split(/\s+/).filter(Boolean).length;
     if (wordCount > config.narrator.maxSourceWords) {
       console.log(`narrator: rejected oversized input (${wordCount} words) from user ${userId}`);
+      return;
+    }
+
+    // Rate limit check (after text + word-count validation, before Claude — only valid jobs consume quota)
+    const rateResult = checkAndRecordRate(db, userId, 'narrator');
+    if (rateResult !== 'ok') {
+      await ctx.reply(rateResult === 'exceeded-hourly'
+        ? 'Rate limit: max 10 narrations per hour. Try again later.'
+        : `Daily cost cap reached ($${config.narrator.maxDailyTtsUsd.toFixed(2)}). Resets on a rolling 24-hour window.`);
       return;
     }
 
@@ -125,6 +135,7 @@ export function createNarratorHandler(db: Database.Database) {
       // 7. Deliver (writes story file, runs md-speak, sends audio, updates output_path/tts_chars/tts_usd)
       await deliverNarration({
         jobId,
+        userId,
         narrative,
         stopReason,
         ctx,
