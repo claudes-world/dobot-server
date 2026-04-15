@@ -66,33 +66,40 @@ export function createNarratorHandler(db: Database.Database) {
 
       const envelope = result.envelope;
 
-      // 5. Update jobs row
-      db.prepare(`
-        UPDATE jobs SET
-          status = ?,
-          completed_at = ?,
-          stop_reason = ?
-        WHERE id = ?
-      `).run(
-        envelope.is_error ? 'failed' : 'completed',
-        Date.now(),
-        envelope.stop_reason ?? null,
-        jobId
-      );
-
+      // 5. Handle error envelope — mark failed and write error column
       if (envelope.is_error) {
         console.error('narrator: claude returned is_error', envelope);
+        try {
+          db.prepare(`UPDATE jobs SET status = 'failed', completed_at = ?, stop_reason = ?, error = ? WHERE id = ?`)
+            .run(Date.now(), envelope.stop_reason ?? null, envelope.result.slice(0, 500), jobId);
+        } catch { /* DB may be closing */ }
+        // Write error text so DB is diagnosable without log scraping
         return;
       }
 
       const narrative = envelope.result;
 
-      // 6. Log output (delivery wired in #6)
+      // 6. Write file first — then update DB so a crash between the two leaves no phantom completed row
       const storiesDir = config.narrator.storiesDir;
       await fs.mkdir(storiesDir, { recursive: true });
       const slug = new Date().toISOString().replace(/[:.]/g, '-');
-      const outPath = path.join(storiesDir, `${slug}-narrator.narration.md`);
+      // Include jobId prefix to prevent same-ms filename collision for concurrent jobs
+      const outPath = path.join(storiesDir, `${slug}-${jobId.slice(0, 8)}-narrator.narration.md`);
       await fs.writeFile(outPath, narrative);
+
+      db.prepare(`
+        UPDATE jobs SET
+          status = 'completed',
+          completed_at = ?,
+          stop_reason = ?,
+          output_path = ?
+        WHERE id = ?
+      `).run(
+        Date.now(),
+        envelope.stop_reason ?? null,
+        outPath,
+        jobId
+      );
 
       console.log(`narrator: job ${jobId} complete — stop_reason=${envelope.stop_reason}, output written to ${outPath}`);
 
@@ -139,6 +146,8 @@ async function spawnNarrator(opts: SpawnOptions): Promise<SpawnResult> {
         input: opts.sourceText,
         extendEnv: false,
         env: {
+          // OAuth-only per ADR 0013 — ANTHROPIC_API_KEY intentionally excluded.
+          // run.sh sets CLAUDE_CONFIG_DIR pointing to .credentials.json symlink.
           PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
           HOME: process.env['HOME'] ?? '/home/claude',
           CLAUDE_CODE_MAX_OUTPUT_TOKENS: '12000',
