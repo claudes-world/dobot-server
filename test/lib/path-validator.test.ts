@@ -17,6 +17,9 @@ const wrongExtInAllowed = path.join(FIXTURE_DIR, 'wrong-ext-test.py');
 const deniedEnvFile = path.join(FIXTURE_DIR, 'test.env');
 
 beforeAll(() => {
+  // Ensure fixture directory exists (host-agnostic safety)
+  fs.mkdirSync(FIXTURE_DIR, { recursive: true });
+
   // 1. Valid .md file
   fs.writeFileSync(validFile, '# Test fixture\n');
 
