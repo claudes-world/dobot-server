@@ -1,3 +1,4 @@
+import './lib/otel.js';
 import 'dotenv/config';
 import { config } from './config.js';
 import { createBot } from './bot-factory.js';
