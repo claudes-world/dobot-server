@@ -15,7 +15,11 @@ export function openDatabase(dbPath: string): Database.Database {
   // Run migrations
   const migrationPath = path.resolve(__dirname, '../../migrations/001-initial.sql');
   const sql = fs.readFileSync(migrationPath, 'utf8');
-  db.exec(sql);
+  const version = db.pragma('user_version', { simple: true }) as number;
+  if (version < 1) {
+    db.exec(sql);
+    db.pragma('user_version = 1');
+  }
 
   return db;
 }
