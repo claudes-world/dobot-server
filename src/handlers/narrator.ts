@@ -7,6 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { config } from '../config.js';
 import { getTracer, withSpan } from '../lib/otel.js';
 import { deliverNarration } from '../delivery/narrator.js';
+import { buildSubprocessEnv } from '../lib/claude-subprocess.js';
 
 const SYSTEM_PROMPT_PARTS = [
   '/home/claude/claudes-world/agents/narrator/.claude/output-styles/narrator.md',
@@ -173,13 +174,12 @@ async function spawnNarrator(opts: SpawnOptions): Promise<SpawnResult> {
       ], {
         input: opts.sourceText,
         extendEnv: false,
-        env: {
-          // OAuth-only per ADR 0013 — ANTHROPIC_API_KEY intentionally excluded.
-          // run.sh sets CLAUDE_CONFIG_DIR pointing to .credentials.json symlink.
-          PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
-          HOME: process.env['HOME'] ?? '/home/claude',
+        // OAuth-only per ADR 0013 — ANTHROPIC_API_KEY intentionally excluded.
+        // run.sh sets CLAUDE_CONFIG_DIR pointing to .credentials.json symlink.
+        // buildSubprocessEnv allowlist: PATH, HOME, TZ only — TELEGRAM_*/NARRATOR_*/ANTHROPIC_* never forwarded.
+        env: buildSubprocessEnv(process.env, {
           CLAUDE_CODE_MAX_OUTPUT_TOKENS: '12000',
-        },
+        }),
         timeout: opts.timeout,
         cleanup: true,
         killSignal: 'SIGKILL',
