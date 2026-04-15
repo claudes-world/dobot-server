@@ -28,7 +28,7 @@ export async function withSpan<T>(
   try {
     return await context.with(trace.setSpan(context.active(), span), () => fn(span));
   } catch (err) {
-    span.recordException(err as Error);
+    span.recordException(err instanceof Error ? err : String(err));
     span.setStatus({ code: SpanStatusCode.ERROR });
     throw err;
   } finally {
