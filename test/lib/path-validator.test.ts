@@ -13,6 +13,8 @@ const oversizedFile = path.join(FIXTURE_DIR, 'oversized-test.md');
 const symlinkInAllowed = path.join(FIXTURE_DIR, 'symlink-escape.md');
 // Wrong extension inside allowed prefix so it reaches the extension check
 const wrongExtInAllowed = path.join(FIXTURE_DIR, 'wrong-ext-test.py');
+// Deny pattern: a real .env file inside the allowed prefix (matches /\.env$/)
+const deniedEnvFile = path.join(FIXTURE_DIR, 'test.env');
 
 beforeAll(() => {
   // 1. Valid .md file
@@ -20,6 +22,9 @@ beforeAll(() => {
 
   // 3. Tilde test file
   fs.writeFileSync(tildeFile, '# Tilde test fixture\n');
+
+  // 4. Deny pattern — create a real .env file so realpathSync succeeds and deny check fires
+  fs.writeFileSync(deniedEnvFile, 'SECRET=test\n');
 
   // 5. Wrong extension — create in allowed prefix so prefix check passes
   fs.writeFileSync(wrongExtInAllowed, 'print("hello")\n');
@@ -36,7 +41,7 @@ beforeAll(() => {
 });
 
 afterAll(() => {
-  for (const f of [validFile, tildeFile, oversizedFile, wrongExtInAllowed]) {
+  for (const f of [validFile, tildeFile, oversizedFile, wrongExtInAllowed, deniedEnvFile]) {
     try { fs.unlinkSync(f); } catch { /* ignore */ }
   }
   try { fs.unlinkSync(symlinkInAllowed); } catch { /* ignore */ }
@@ -58,9 +63,8 @@ describe('validateFilePath', () => {
     expect(result).toBe(tildeFile);
   });
 
-  it('4. denied pattern .secrets — throws', () => {
-    // realpathSync throws for nonexistent path, which is also correct security behavior
-    expect(() => validateFilePath('/home/claude/claudes-world/.secrets/test.md')).toThrow();
+  it('4. denied pattern .env — throws with deny message (real file, exercises deny-pattern branch)', () => {
+    expect(() => validateFilePath(deniedEnvFile)).toThrow(/deny pattern/);
   });
 
   it('5. wrong extension — throws', () => {

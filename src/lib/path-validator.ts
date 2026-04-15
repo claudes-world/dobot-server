@@ -33,8 +33,13 @@ export function validateFilePath(userPath: string): string {
   if (!ALLOWED_EXT.some(ext => resolved.endsWith(ext))) {
     throw new Error(`Path extension not allowed: ${path.extname(resolved)}`);
   }
-  // 6. Size check
+  // 6. Size + type check
+  // NOTE: TOCTOU window exists between realpathSync and statSync; callers must
+  // re-verify path identity at open() time if high-assurance is required.
   const stat = fs.statSync(resolved);
+  if (!stat.isFile()) {
+    throw new Error(`Path is not a regular file: ${resolved}`);
+  }
   if (stat.size > MAX_SOURCE_BYTES) {
     throw new Error(`File too large: ${stat.size} bytes (max ${MAX_SOURCE_BYTES})`);
   }
