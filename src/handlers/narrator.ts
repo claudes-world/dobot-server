@@ -5,6 +5,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { config } from '../config.js';
+import { deliverNarration } from '../delivery/narrator.js';
 
 const SYSTEM_PROMPT_PARTS = [
   '/home/claude/claudes-world/agents/narrator/.claude/output-styles/narrator.md',
@@ -85,30 +86,32 @@ export function createNarratorHandler(db: Database.Database) {
       }
 
       const narrative = envelope.result;
+      const stopReason = envelope.stop_reason ?? 'end_turn';
 
-      // 6. Write file first — then update DB so a crash between the two leaves no phantom completed row
-      const storiesDir = config.narrator.storiesDir;
-      await fs.mkdir(storiesDir, { recursive: true });
-      const slug = new Date().toISOString().replace(/[:.]/g, '-');
-      // Include jobId prefix to prevent same-ms filename collision for concurrent jobs
-      const outPath = path.join(storiesDir, `${slug}-${jobId.slice(0, 8)}-narrator.narration.md`);
-      await fs.writeFile(outPath, narrative);
-
+      // 6. Mark job completed first, then deliver
+      // output_path + tts_chars + tts_usd will be patched by deliverNarration after audio is generated
       db.prepare(`
         UPDATE jobs SET
           status = 'completed',
           completed_at = ?,
-          stop_reason = ?,
-          output_path = ?
+          stop_reason = ?
         WHERE id = ?
       `).run(
         Date.now(),
-        envelope.stop_reason ?? null,
-        outPath,
+        stopReason,
         jobId
       );
 
-      console.log(`narrator: job ${jobId} complete — stop_reason=${envelope.stop_reason}, output written to ${outPath}`);
+      console.log(`narrator: job ${jobId} complete — stop_reason=${stopReason}, starting delivery`);
+
+      // 7. Deliver (writes story file, runs md-speak, sends audio, updates output_path/tts_chars/tts_usd)
+      await deliverNarration({
+        jobId,
+        narrative,
+        stopReason,
+        ctx,
+        db,
+      });
 
     } catch (err: unknown) {
       // Update job row to failed — any unhandled throw reaches here
