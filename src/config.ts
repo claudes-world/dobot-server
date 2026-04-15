@@ -24,5 +24,7 @@ export const config = {
     maxSourceWords: Number(optional('NARRATOR_MAX_SOURCE_WORDS', '8000')),
     storiesDir: optional('NARRATOR_STORIES_DIR', '/home/claude/claudes-world/.world/stories'),
     tmpDir: optional('NARRATOR_TMP_DIR', '/tmp'),
+    maxJobsPerHour: Number(optional('NARRATOR_MAX_JOBS_PER_HOUR', '10')),
+    maxDailyTtsUsd: Number(optional('NARRATOR_MAX_DAILY_TTS_USD', '5.00')),
   },
 };

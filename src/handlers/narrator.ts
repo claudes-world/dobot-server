@@ -8,6 +8,7 @@ import { config } from '../config.js';
 import { getTracer, withSpan } from '../lib/otel.js';
 import { deliverNarration } from '../delivery/narrator.js';
 import { buildSubprocessEnv } from '../lib/claude-subprocess.js';
+import { checkAndRecordRate } from '../lib/rate-limit.js';
 
 const SYSTEM_PROMPT_PARTS = [
   '/home/claude/claudes-world/agents/narrator/.claude/output-styles/narrator.md',
@@ -39,6 +40,15 @@ export function createNarratorHandler(db: Database.Database) {
 
     // 1. Filter — silently reject if not in allowlist
     if (!config.narrator.allowedUserIds.has(userId)) return;
+
+    // Rate limit check (after allowlist, before Claude)
+    const rateResult = checkAndRecordRate(db, userId, 'narrator');
+    if (rateResult !== 'ok') {
+      await ctx.reply(rateResult === 'exceeded-hourly'
+        ? 'Rate limit: max 10 narrations per hour. Try again later.'
+        : `Daily cost cap reached ($${config.narrator.maxDailyTtsUsd.toFixed(2)}). Resets at midnight ET.`);
+      return;
+    }
 
     const sourceText = ctx.message?.text;
     if (!sourceText) return;
