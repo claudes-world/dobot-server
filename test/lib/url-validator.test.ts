@@ -82,9 +82,10 @@ describe('validateAndFetchUrl', () => {
   });
 
   it('5. redirect chain > 3 — throws too-many-redirects', async () => {
+    // dns.lookup always returns public IP (called once per hop)
     mockDnsLookup.mockResolvedValue({ address: '93.184.216.34', family: 4 });
 
-    // 4 redirects → exceeds MAX_REDIRECTS=3
+    // 4 consecutive 301s — exceeds MAX_REDIRECTS=3
     fetchStub
       .mockResolvedValueOnce(makeResponse({ status: 301, location: 'https://example.com/r1' }))
       .mockResolvedValueOnce(makeResponse({ status: 301, location: 'https://example.com/r2' }))
@@ -110,7 +111,6 @@ describe('validateAndFetchUrl', () => {
   it('7. body > 500KB — throws body too large', async () => {
     mockDnsLookup.mockResolvedValue({ address: '93.184.216.34', family: 4 });
 
-    // Stream slightly over 500KB in one chunk
     const bigBody = 'x'.repeat(500 * 1024 + 1);
     fetchStub.mockResolvedValue(
       makeResponse({ headers: { 'content-type': 'text/plain' }, body: bigBody })
@@ -129,6 +129,32 @@ describe('validateAndFetchUrl', () => {
 
     await expect(validateAndFetchUrl('https://example.com/slow')).rejects.toThrow(
       /timed out/
+    );
+  });
+
+  it('9. redirect to HTTP — throws non-HTTPS redirect error', async () => {
+    mockDnsLookup.mockResolvedValue({ address: '93.184.216.34', family: 4 });
+    fetchStub.mockResolvedValueOnce(
+      makeResponse({ status: 301, location: 'http://example.com/downgrade' })
+    );
+
+    await expect(validateAndFetchUrl('https://example.com/')).rejects.toThrow(
+      /non-HTTPS/
+    );
+  });
+
+  it('10. redirect to private IP — throws private IP error', async () => {
+    // DNS called once per hop: first call for example.com (public), second for internal.corp (private)
+    mockDnsLookup
+      .mockResolvedValueOnce({ address: '93.184.216.34', family: 4 })  // hop 1: example.com
+      .mockResolvedValueOnce({ address: '192.168.1.1', family: 4 });   // hop 2: internal.corp
+
+    fetchStub.mockResolvedValueOnce(
+      makeResponse({ status: 301, location: 'https://internal.corp/admin' })
+    );
+
+    await expect(validateAndFetchUrl('https://example.com/')).rejects.toThrow(
+      /private IP address/
     );
   });
 });
