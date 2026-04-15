@@ -2,7 +2,7 @@ import { NodeTracerProvider } from '@opentelemetry/sdk-trace-node';
 import { SimpleSpanProcessor, ConsoleSpanExporter } from '@opentelemetry/sdk-trace-base';
 import { Resource } from '@opentelemetry/resources';
 import { ATTR_SERVICE_NAME } from '@opentelemetry/semantic-conventions';
-import { trace, Tracer, Span, SpanStatusCode } from '@opentelemetry/api';
+import { context, trace, Tracer, Span, SpanStatusCode } from '@opentelemetry/api';
 
 const provider = new NodeTracerProvider({
   resource: new Resource({
@@ -26,7 +26,7 @@ export async function withSpan<T>(
 ): Promise<T> {
   const span = tracer.startSpan(name, { attributes: attrs });
   try {
-    return await fn(span);
+    return await context.with(trace.setSpan(context.active(), span), () => fn(span));
   } catch (err) {
     span.recordException(err as Error);
     span.setStatus({ code: SpanStatusCode.ERROR });
