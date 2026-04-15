@@ -18,9 +18,14 @@ async function main(): Promise<void> {
     },
   });
 
-  // Graceful shutdown
-  process.once('SIGINT', () => { narratorBot.stop(); db.close(); });
-  process.once('SIGTERM', () => { narratorBot.stop(); db.close(); });
+  // Graceful shutdown — await bot stop before closing DB so in-flight handlers
+  // aren't left with a closed database under their feet.
+  const shutdown = async (): Promise<void> => {
+    await narratorBot.stop();
+    db.close();
+  };
+  process.once('SIGINT', () => { shutdown().catch(console.error); });
+  process.once('SIGTERM', () => { shutdown().catch(console.error); });
 
   console.log('dobot-server listening...');
   await narratorBot.start();
