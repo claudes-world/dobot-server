@@ -1,13 +1,12 @@
 import { Context } from 'grammy';
 import Database from 'better-sqlite3';
-import { execa } from 'execa';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { config } from '../config.js';
 import { getTracer, withSpan } from '../lib/otel.js';
 import { deliverNarration } from '../delivery/narrator.js';
-import { buildSubprocessEnv } from '../lib/claude-subprocess.js';
+import { buildSubprocessEnv, spawnClaudeWithRetry, ClaudeEnvelope } from '../lib/claude-subprocess.js';
 import { checkAndRecordRate } from '../lib/rate-limit.js';
 
 const SYSTEM_PROMPT_PARTS = [
@@ -18,18 +17,6 @@ const SYSTEM_PROMPT_PARTS = [
 const USER_PROMPT = `Rewrite the source provided via stdin as a serious origin-story narrative suitable for text-to-speech playback.
 Target length: medium (approximately 600-900 words of output).
 Respond ONLY with the narrative prose — do not write files, do not include preamble, do not add commentary at the end.`;
-
-interface ClaudeEnvelope {
-  type: string;
-  subtype: string;
-  is_error: boolean;
-  result: string;
-  stop_reason: string;
-  usage?: {
-    input_tokens: number;
-    output_tokens: number;
-  };
-}
 
 const tracer = getTracer('narrator');
 
@@ -172,57 +159,18 @@ interface SpawnResult {
 }
 
 async function spawnNarrator(opts: SpawnOptions): Promise<SpawnResult> {
-  let retried = false;
-
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      const proc = await execa(opts.runScript, [
-        '-p', USER_PROMPT,
-        '--output-format', 'json',
-        '--append-system-prompt-file', opts.sysFile,
-        '--model', opts.model,
-        '--allowedTools', '',  // zero-tool allowlist — narrator rewrite needs no tools; empty allowlist > denylist
-      ], {
-        input: opts.sourceText,
-        extendEnv: false,
-        // OAuth-only per ADR 0013 — ANTHROPIC_API_KEY intentionally excluded.
-        // run.sh sets CLAUDE_CONFIG_DIR pointing to .credentials.json symlink.
-        // buildSubprocessEnv allowlist: PATH, HOME, TZ only — TELEGRAM_*/NARRATOR_*/ANTHROPIC_* never forwarded.
-        env: buildSubprocessEnv(process.env, {
-          CLAUDE_CODE_MAX_OUTPUT_TOKENS: '12000',
-        }),
-        timeout: opts.timeout,
-        cleanup: true,
-        killSignal: 'SIGKILL',
-      });
-
-      let envelope: ClaudeEnvelope;
-      try {
-        const parsed = JSON.parse(proc.stdout) as Record<string, unknown>;
-        // Runtime shape check — ensure critical fields are present
-        if (typeof parsed['is_error'] !== 'boolean' || typeof parsed['result'] !== 'string') {
-          throw new Error(`Malformed Claude envelope — missing is_error or result. stdout: ${proc.stdout.slice(0, 200)}`);
-        }
-        envelope = parsed as unknown as ClaudeEnvelope;
-      } catch (parseErr) {
-        throw new Error(`Failed to parse Claude output: ${String(parseErr)}. stdout: ${proc.stdout.slice(0, 200)}`);
-      }
-      return { envelope, retried };
-
-    } catch (err: unknown) {
-      const msg = String(err);
-      const isAuthError = msg.includes('401') || msg.includes('authentication') || msg.includes('OAuth');
-
-      if (attempt === 0 && isAuthError) {
-        retried = true;
-        console.warn('narrator: OAuth error on attempt 1, retrying once...');
-        await new Promise(r => setTimeout(r, 2000));
-        continue;
-      }
-
-      throw err;
-    }
-  }
-
-  throw new Error('narrator: exhausted retries');
+  const args = [
+    '-p', USER_PROMPT,
+    '--output-format', 'json',
+    '--append-system-prompt-file', opts.sysFile,
+    '--model', opts.model,
+    '--allowedTools', '',  // zero-tool allowlist — narrator rewrite needs no tools; empty allowlist > denylist
+  ];
+  // OAuth-only per ADR 0013 — ANTHROPIC_API_KEY intentionally excluded.
+  // run.sh sets CLAUDE_CONFIG_DIR pointing to .credentials.json symlink.
+  // buildSubprocessEnv allowlist: PATH, HOME, TZ only — TELEGRAM_*/NARRATOR_*/ANTHROPIC_* never forwarded.
+  const env = buildSubprocessEnv(process.env, {
+    CLAUDE_CODE_MAX_OUTPUT_TOKENS: '12000',
+  });
+  return spawnClaudeWithRetry(opts.runScript, args, opts.sourceText, env, opts.timeout);
 }
