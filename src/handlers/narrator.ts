@@ -38,6 +38,13 @@ export function createNarratorHandler(db: Database.Database) {
     const sourceText = ctx.message?.text;
     if (!sourceText) return;
 
+    // Word-count guard — reject oversized input before spawning subprocess
+    const wordCount = sourceText.split(/\s+/).filter(Boolean).length;
+    if (wordCount > config.narrator.maxSourceWords) {
+      console.log(`narrator: rejected oversized input (${wordCount} words) from user ${userId}`);
+      return;
+    }
+
     const jobId = randomUUID();
     const now = Date.now();
 
@@ -142,6 +149,7 @@ async function spawnNarrator(opts: SpawnOptions): Promise<SpawnResult> {
         '--output-format', 'json',
         '--append-system-prompt-file', opts.sysFile,
         '--model', opts.model,
+        '--disallowedTools', 'Read,Grep',  // prevent prompt injection triggering file reads
       ], {
         input: opts.sourceText,
         extendEnv: false,
