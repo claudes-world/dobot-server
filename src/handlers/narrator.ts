@@ -88,21 +88,11 @@ export function createNarratorHandler(db: Database.Database) {
       const narrative = envelope.result;
       const stopReason = envelope.stop_reason ?? 'end_turn';
 
-      // 6. Mark job completed first, then deliver
-      // output_path + tts_chars + tts_usd will be patched by deliverNarration after audio is generated
-      db.prepare(`
-        UPDATE jobs SET
-          status = 'completed',
-          completed_at = ?,
-          stop_reason = ?
-        WHERE id = ?
-      `).run(
-        Date.now(),
-        stopReason,
-        jobId
-      );
+      // 6. Record stop_reason only — status stays 'active' until deliverNarration succeeds
+      // This prevents a phantom completed row if delivery crashes after this point
+      db.prepare(`UPDATE jobs SET stop_reason = ? WHERE id = ?`).run(stopReason, jobId);
 
-      console.log(`narrator: job ${jobId} complete — stop_reason=${stopReason}, starting delivery`);
+      console.log(`narrator: job ${jobId} rewrite done — stop_reason=${stopReason}, starting delivery`);
 
       // 7. Deliver (writes story file, runs md-speak, sends audio, updates output_path/tts_chars/tts_usd)
       await deliverNarration({

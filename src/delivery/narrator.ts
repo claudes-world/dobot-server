@@ -46,18 +46,8 @@ export async function deliverNarration(opts: DeliveryOptions): Promise<void> {
   }
   await fs.writeFile(mdPath, finalNarrative);
 
-  // 2. Invoke share-doc --no-audio to get deep link
-  let deepLink: string | null = null;
-  try {
-    const shareResult = await execa('share-doc', ['--no-audio', mdPath], {
-      extendEnv: true, // share-doc needs full env (Google creds etc.)
-      timeout: 60000,
-    });
-    // share-doc outputs a URL on stdout
-    deepLink = shareResult.stdout.trim() || null;
-  } catch (err) {
-    console.warn('narrator: share-doc failed, no deep link:', err);
-  }
+  // 2. Construct CPC deep link directly from mdPath
+  const deepLink: string = `https://cpc.claude.do/#file=${encodeURIComponent(mdPath)}`;
 
   // 3. Invoke md-speak --no-describe to generate audio
   const mp3Path = mdPath.replace('.narration.md', '.mp3');
@@ -68,7 +58,13 @@ export async function deliverNarration(opts: DeliveryOptions): Promise<void> {
   const mdSpeakStart = Date.now();
   try {
     await execa('md-speak', ['--no-describe', mdPath], {
-      extendEnv: true,
+      extendEnv: false,
+      env: {
+        PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
+        HOME: process.env['HOME'] ?? '/home/claude',
+        ...(process.env['GOOGLE_APPLICATION_CREDENTIALS'] ? { GOOGLE_APPLICATION_CREDENTIALS: process.env['GOOGLE_APPLICATION_CREDENTIALS'] } : {}),
+        ...(process.env['GOOGLE_CLOUD_PROJECT'] ? { GOOGLE_CLOUD_PROJECT: process.env['GOOGLE_CLOUD_PROJECT'] } : {}),
+      },
       timeout: config.narrator.mdSpeakTimeout,
       cleanup: true,
       killSignal: 'SIGKILL',
@@ -86,9 +82,7 @@ export async function deliverNarration(opts: DeliveryOptions): Promise<void> {
 
   // 4. Build inline keyboard
   const keyboard = new InlineKeyboard();
-  if (deepLink) {
-    keyboard.url('Read in Pocket Console', deepLink);
-  }
+  keyboard.url('Read in Pocket Console', deepLink);
 
   // 5. Build caption
   const truncatedWarning = stopReason === 'max_tokens' ? ' ⚠️ truncated (max_tokens — 12k cap)' : '';
@@ -98,7 +92,7 @@ export async function deliverNarration(opts: DeliveryOptions): Promise<void> {
   if (audioGenerated) {
     const mp3Stat = await fs.stat(mp3Path);
     const mp3Size = mp3Stat.size;
-    const hasKeyboard = deepLink ? { reply_markup: keyboard } : {};
+    const hasKeyboard = { reply_markup: keyboard };
 
     if (mp3Size < 1_000_000) {
       // < 1MB: send as voice note
@@ -110,36 +104,54 @@ export async function deliverNarration(opts: DeliveryOptions): Promise<void> {
       // > 50MB: publish to VPS share
       try {
         const pubResult = await execa('publish-shared', ['--tmp', 'private', mp3Path], {
-          extendEnv: true,
+          extendEnv: false,
+          env: {
+            PATH: process.env['PATH'] ?? '/usr/local/bin:/usr/bin:/bin',
+            HOME: process.env['HOME'] ?? '/home/claude',
+            ...(process.env['GOOGLE_APPLICATION_CREDENTIALS'] ? { GOOGLE_APPLICATION_CREDENTIALS: process.env['GOOGLE_APPLICATION_CREDENTIALS'] } : {}),
+            ...(process.env['GOOGLE_CLOUD_PROJECT'] ? { GOOGLE_CLOUD_PROJECT: process.env['GOOGLE_CLOUD_PROJECT'] } : {}),
+            ...(process.env['SHARED_PRIVATE_BASE_URL'] ? { SHARED_PRIVATE_BASE_URL: process.env['SHARED_PRIVATE_BASE_URL'] } : {}),
+          },
           timeout: 60000,
         });
-        const shareUrl = pubResult.stdout.trim();
+        // publish-shared outputs multi-line stdout; extract the URL: line
+        const urlLine2 = pubResult.stdout.split('\n').find(l => l.startsWith('URL: '));
+        const shareUrl = urlLine2 ? urlLine2.replace(/^URL:\s*/, '').trim() : '';
+        if (!shareUrl) {
+          throw new Error('publish-shared did not output a URL line');
+        }
         const urlKeyboard = new InlineKeyboard().url('Download audio', shareUrl);
-        if (deepLink) urlKeyboard.url('Read in Pocket Console', deepLink);
+        urlKeyboard.url('Read in Pocket Console', deepLink);
         await ctx.reply(caption, { reply_markup: urlKeyboard });
       } catch (pubErr) {
         console.error('narrator: publish-shared failed:', pubErr);
-        await ctx.reply(`${caption}\n\n(Audio too large to send directly — ${Math.round(mp3Size / 1_000_000)}MB)`, deepLink ? { reply_markup: keyboard } : {});
+        await ctx.reply(`${caption}\n\n(Audio too large to send directly — ${Math.round(mp3Size / 1_000_000)}MB)`, { reply_markup: keyboard });
       }
     }
   } else {
     // No audio: deliver markdown only
-    await ctx.reply(`${caption}\n\n(Audio generation failed — see logs)`, deepLink ? { reply_markup: keyboard } : {});
+    await ctx.reply(`${caption}\n\n(Audio generation failed — see logs)`, { reply_markup: keyboard });
   }
 
   // Suppress unused variable warning — ttsDurationMs is available for future telemetry
   void ttsDurationMs;
 
-  // 7. Update jobs row
+  // 7. Update jobs row — mark completed here (after delivery succeeds) so a crash during delivery
+  // leaves the job as 'active', not phantom-completed
   const ttsUsd = ttsChars > 0 ? (ttsChars / 1_000_000) * 16.0 : 0; // Google TTS ~$16/M chars WaveNet
   try {
-    db.prepare(`
+    const result = db.prepare(`
       UPDATE jobs SET
+        status = 'completed',
+        completed_at = ?,
         output_path = ?,
         tts_chars = ?,
         tts_usd = ?
-      WHERE id = ?
-    `).run(mdPath, ttsChars, ttsUsd, jobId);
+      WHERE id = ? AND status = 'active'
+    `).run(Date.now(), mdPath, ttsChars, ttsUsd, jobId);
+    if ((result as { changes: number }).changes === 0) {
+      console.warn(`narrator: job ${jobId} status was not active at completion — skipping completed update`);
+    }
   } catch (dbErr) {
     console.error('narrator: DB update failed after delivery:', dbErr);
   }
