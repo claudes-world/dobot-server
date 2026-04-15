@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+command -v jq &>/dev/null || exit 0
 jq -n --arg id "${NARRATOR_JOB_ID:-unknown}" \
    --argjson ts "$(date +%s%3N)" \
    '{name: "session.narrator.stop", ts: $ts, job_id: $id}' \
