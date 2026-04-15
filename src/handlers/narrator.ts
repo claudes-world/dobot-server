@@ -41,15 +41,6 @@ export function createNarratorHandler(db: Database.Database) {
     // 1. Filter — silently reject if not in allowlist
     if (!config.narrator.allowedUserIds.has(userId)) return;
 
-    // Rate limit check (after allowlist, before Claude)
-    const rateResult = checkAndRecordRate(db, userId, 'narrator');
-    if (rateResult !== 'ok') {
-      await ctx.reply(rateResult === 'exceeded-hourly'
-        ? 'Rate limit: max 10 narrations per hour. Try again later.'
-        : `Daily cost cap reached ($${config.narrator.maxDailyTtsUsd.toFixed(2)}). Resets at midnight ET.`);
-      return;
-    }
-
     const sourceText = ctx.message?.text;
     if (!sourceText) return;
 
@@ -57,6 +48,15 @@ export function createNarratorHandler(db: Database.Database) {
     const wordCount = sourceText.split(/\s+/).filter(Boolean).length;
     if (wordCount > config.narrator.maxSourceWords) {
       console.log(`narrator: rejected oversized input (${wordCount} words) from user ${userId}`);
+      return;
+    }
+
+    // Rate limit check (after text + word-count validation, before Claude — only valid jobs consume quota)
+    const rateResult = checkAndRecordRate(db, userId, 'narrator');
+    if (rateResult !== 'ok') {
+      await ctx.reply(rateResult === 'exceeded-hourly'
+        ? 'Rate limit: max 10 narrations per hour. Try again later.'
+        : `Daily cost cap reached ($${config.narrator.maxDailyTtsUsd.toFixed(2)}). Resets on a rolling 24-hour window.`);
       return;
     }
 
@@ -135,6 +135,7 @@ export function createNarratorHandler(db: Database.Database) {
       // 7. Deliver (writes story file, runs md-speak, sends audio, updates output_path/tts_chars/tts_usd)
       await deliverNarration({
         jobId,
+        userId,
         narrative,
         stopReason,
         ctx,
