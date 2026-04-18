@@ -5,7 +5,8 @@ import { createBot } from './bot-factory.js';
 import { openDatabase } from './state/db.js';
 import { startupSweep } from './state/cleanup.js';
 import { registerHandlers } from './router.js';
-import { createNarratorHandler } from './handlers/narrator.js';
+import { createNarratorHandler, continueNarration } from './handlers/narrator.js';
+import { createLengthCallbackHandler } from './handlers/narrator-callback.js';
 
 async function main(): Promise<void> {
   const db = openDatabase(config.dobotDbPath);
@@ -15,6 +16,9 @@ async function main(): Promise<void> {
 
   registerHandlers(narratorBot, {
     narrator: createNarratorHandler(db),
+    narratorCallback: createLengthCallbackHandler(db, (jobId, length, ctx) =>
+      continueNarration(jobId, length, ctx, db)
+    ),
   });
 
   // Graceful shutdown — idempotent guard ensures concurrent SIGINT+SIGTERM

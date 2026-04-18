@@ -1,0 +1,110 @@
+import { Context } from 'grammy';
+import Database from 'better-sqlite3';
+import fs from 'node:fs/promises';
+
+interface PendingChoice {
+  job_id: string;
+  chat_id: number;
+  keyboard_msg_id: number;
+  source_tmpfile: string;
+  tone_prefix: string | null;
+  shape_prefix: string | null;
+  expires_at: number;
+}
+
+/**
+ * Handle inline keyboard callback for length selection.
+ * callback_data format: "length:<jobId>:<short|medium|full>"
+ */
+export function createLengthCallbackHandler(
+  db: Database.Database,
+  onLengthChosen: (jobId: string, length: 'short' | 'medium' | 'full', ctx: Context) => Promise<void>
+) {
+  return async function lengthCallbackHandler(ctx: Context): Promise<void> {
+    const data = ctx.callbackQuery?.data;
+    if (!data?.startsWith('length:')) {
+      await ctx.answerCallbackQuery();
+      return;
+    }
+
+    const parts = data.split(':');
+    if (parts.length !== 3) {
+      await ctx.answerCallbackQuery({ text: 'Invalid selection.' });
+      return;
+    }
+
+    const [, jobId, lengthStr] = parts;
+    const length = lengthStr as 'short' | 'medium' | 'full';
+
+    if (!['short', 'medium', 'full'].includes(length)) {
+      await ctx.answerCallbackQuery({ text: 'Invalid length.' });
+      return;
+    }
+
+    // Atomically consume nonce — any concurrent path gets nothing (TOCTOU fix)
+    const pending = db.prepare(
+      `DELETE FROM pending_length_choices WHERE job_id = ? RETURNING *`
+    ).get(jobId) as PendingChoice | undefined;
+
+    if (!pending) {
+      // Already consumed (race) or never existed
+      try {
+        await ctx.editMessageText('⏱ Selection expired — already processed or timed out.');
+      } catch { /* message may have been deleted */ }
+      await ctx.answerCallbackQuery({ text: 'This selection has expired.' });
+      return;
+    }
+
+    // Validate chat_id matches (prevents cross-chat replay)
+    if (ctx.chat?.id !== pending.chat_id) {
+      console.warn(`narrator: callback chat_id mismatch — got ${ctx.chat?.id}, expected ${pending.chat_id}`);
+      try { await ctx.answerCallbackQuery({ text: 'Invalid selection.' }); } catch { /* non-fatal */ }
+      return;
+    }
+
+    // Check expires_at (belt-and-suspenders; row may have been kept by startup rebuild)
+    if (Date.now() > pending.expires_at) {
+      if (pending.keyboard_msg_id) {
+        try { await ctx.editMessageText('⏱ Selection expired.'); } catch { /* swallow */ }
+      }
+      db.prepare(`UPDATE jobs SET status = 'failed', completed_at = ?, error = ? WHERE id = ? AND status = 'active'`)
+        .run(Date.now(), 'length selection expired', pending.job_id);
+      try { await fs.unlink(pending.source_tmpfile); } catch { /* already gone */ }
+      try { await ctx.answerCallbackQuery({ text: 'Selection expired.' }); } catch { /* non-fatal */ }
+      return;
+    }
+
+    // Sweep other pending keyboards for this chat_id — clean up jobs + temp files (stale keyboard fix)
+    const others = db.prepare(
+      `DELETE FROM pending_length_choices WHERE chat_id = ? AND job_id != ? RETURNING job_id, keyboard_msg_id, source_tmpfile`
+    ).all(pending.chat_id, jobId) as { job_id: string; keyboard_msg_id: number; source_tmpfile: string }[];
+
+    for (const other of others) {
+      // Disable keyboard UI
+      try {
+        await ctx.api.editMessageReplyMarkup(pending.chat_id, other.keyboard_msg_id, undefined);
+      } catch { /* message may have been deleted or already removed */ }
+      // Mark job cancelled (was never started)
+      db.prepare(`UPDATE jobs SET status = 'failed', completed_at = ?, error = ? WHERE id = ? AND status = 'active'`)
+        .run(Date.now(), 'superseded by newer keyboard selection', other.job_id);
+      // Clean up temp file
+      try { await fs.unlink(other.source_tmpfile); } catch { /* already gone */ }
+    }
+
+    // Edit keyboard message to show selection
+    const labelMap = { short: 'short (~2min)', medium: 'medium (3-7min)', full: 'full length' };
+    try {
+      await ctx.editMessageText(`Rewriting in ${labelMap[length]} mode…`);
+    } catch { /* swallow */ }
+
+    // Wrap answerCallbackQuery so a throw doesn't prevent onLengthChosen
+    try {
+      await ctx.answerCallbackQuery();
+    } catch (err) {
+      console.warn('narrator: answerCallbackQuery failed (non-fatal):', err);
+    }
+
+    // Invoke the continuation (will spawn Claude rewrite)
+    await onLengthChosen(jobId, length, ctx);
+  };
+}
