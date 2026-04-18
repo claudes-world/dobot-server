@@ -113,7 +113,7 @@ function createTestDb(): Database.Database {
 function makeCtx(overrides: Record<string, unknown> = {}) {
   return {
     from: { id: 1 },
-    chat: { id: 100 },
+    chat: { id: 100, type: 'private' },
     message: { text: 'Hello world story', message_id: 42 },
     reply: vi.fn().mockResolvedValue({ message_id: 99 }),
     api: {

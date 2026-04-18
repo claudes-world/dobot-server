@@ -54,6 +54,8 @@ function userFacingError(err: unknown): string {
 
 export function createNarratorHandler(db: Database.Database) {
   return async function narratorHandler(ctx: Context): Promise<void> {
+    if (ctx.chat?.type !== 'private') return;
+
     const userId = ctx.from?.id;
     if (!userId) return;
 
