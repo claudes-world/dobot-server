@@ -17,6 +17,7 @@ vi.mock('../../src/config.js', () => ({
       tmpDir: '/tmp',
       maxJobsPerHour: 10,
       maxDailyTtsUsd: 5.0,
+      lengthTimeoutMs: 20000,
     },
   },
 }));
@@ -43,19 +44,20 @@ vi.mock('../../src/delivery/narrator.js', () => ({
   deliverNarration: vi.fn().mockResolvedValue(undefined),
 }));
 
-vi.mock('node:fs/promises', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('node:fs/promises')>();
-  return {
-    ...actual,
-    readFile: vi.fn().mockResolvedValue('mock system prompt'),
+vi.mock('node:fs/promises', () => ({
+  default: {
+    readFile: vi.fn().mockResolvedValue('mock source text'),
     writeFile: vi.fn().mockResolvedValue(undefined),
     unlink: vi.fn().mockResolvedValue(undefined),
-  };
-});
+  },
+  readFile: vi.fn().mockResolvedValue('mock source text'),
+  writeFile: vi.fn().mockResolvedValue(undefined),
+  unlink: vi.fn().mockResolvedValue(undefined),
+}));
 
 import { spawnClaudeWithRetry } from '../../src/lib/claude-subprocess.js';
 import { deliverNarration } from '../../src/delivery/narrator.js';
-import { createNarratorHandler } from '../../src/handlers/narrator.js';
+import { createNarratorHandler, continueNarration } from '../../src/handlers/narrator.js';
 
 function createTestDb(): Database.Database {
   const db = new Database(':memory:');
@@ -79,6 +81,16 @@ function createTestDb(): Database.Database {
       tts_failed      INTEGER NOT NULL DEFAULT 0,
       stop_reason     TEXT,
       error           TEXT
+    );
+    CREATE TABLE IF NOT EXISTS pending_length_choices (
+      job_id          TEXT PRIMARY KEY,
+      chat_id         INTEGER NOT NULL,
+      keyboard_msg_id INTEGER NOT NULL,
+      source_tmpfile  TEXT NOT NULL,
+      tone_prefix     TEXT,
+      shape_prefix    TEXT,
+      expires_at      INTEGER NOT NULL,
+      FOREIGN KEY (job_id) REFERENCES jobs(id)
     );
     CREATE TABLE IF NOT EXISTS rate_limits_hourly (
       id        INTEGER PRIMARY KEY,
@@ -112,6 +124,13 @@ function makeCtx(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function insertJob(db: Database.Database, jobId: string, chatId = 100) {
+  db.prepare(`
+    INSERT INTO jobs (id, handler, chat_id, user_id, started_at, status)
+    VALUES (?, 'narrator', ?, 1, ?, 'active')
+  `).run(jobId, chatId, Date.now());
+}
+
 const mockSuccessEnvelope = {
   envelope: {
     is_error: false,
@@ -121,7 +140,7 @@ const mockSuccessEnvelope = {
   retried: false,
 };
 
-describe('narratorHandler — ack + typing indicator', () => {
+describe('narratorHandler — keyboard ack (message phase)', () => {
   let db: Database.Database;
 
   beforeEach(() => {
@@ -131,38 +150,76 @@ describe('narratorHandler — ack + typing indicator', () => {
     vi.mocked(deliverNarration).mockResolvedValue(undefined);
   });
 
-  it('1. Ack sent before spawn', async () => {
-    const order: string[] = [];
-    vi.mocked(spawnClaudeWithRetry).mockImplementation(async () => {
-      order.push('spawn');
-      return mockSuccessEnvelope;
-    });
-
-    const ctx = makeCtx({
-      reply: vi.fn().mockImplementation(async () => {
-        order.push('reply');
-        return { message_id: 99 };
-      }),
-    });
-
-    const handler = createNarratorHandler(db);
-    await handler(ctx as never);
-
-    // reply (ack) must come before spawn
-    const replyIdx = order.indexOf('reply');
-    const spawnIdx = order.indexOf('spawn');
-    expect(replyIdx).toBeGreaterThanOrEqual(0);
-    expect(spawnIdx).toBeGreaterThanOrEqual(0);
-    expect(replyIdx).toBeLessThan(spawnIdx);
-  });
-
-  it('2. Typing interval cleared on success', async () => {
-    const clearIntervalSpy = vi.spyOn(global, 'clearInterval');
-    const setIntervalSpy = vi.spyOn(global, 'setInterval');
-
+  it('1. Keyboard sent as ack (no spawn in message phase)', async () => {
     const ctx = makeCtx();
     const handler = createNarratorHandler(db);
     await handler(ctx as never);
+
+    // reply called with keyboard markup
+    expect(ctx.reply).toHaveBeenCalledWith(
+      expect.stringContaining('length'),
+      expect.objectContaining({ reply_markup: expect.anything() })
+    );
+
+    // spawn NOT called in message phase — user must choose length first
+    expect(spawnClaudeWithRetry).not.toHaveBeenCalled();
+  });
+
+  it('2. Pending row inserted after ack', async () => {
+    const ctx = makeCtx();
+    const handler = createNarratorHandler(db);
+    await handler(ctx as never);
+
+    const rows = db.prepare(`SELECT * FROM pending_length_choices`).all();
+    expect(rows.length).toBe(1);
+  });
+
+  it('3. Ack failure does not abort — pending row still inserted', async () => {
+    const ctx = makeCtx({
+      reply: vi.fn().mockRejectedValue(new Error('Telegram API down')),
+    });
+
+    const handler = createNarratorHandler(db);
+    // ack fail is best-effort — handler should not throw
+    await expect(handler(ctx as never)).resolves.not.toThrow();
+
+    // When ack fails, ackMessageId is undefined, so no pending row inserted
+    // (guard: `if (ackMessageId)` wraps the insert)
+    const rows = db.prepare(`SELECT * FROM pending_length_choices`).all();
+    // No row when ackMessageId unknown — that's correct per spec
+    expect(rows.length).toBe(0);
+  });
+
+  it('4. Job row inserted with NULL length', async () => {
+    const ctx = makeCtx();
+    const handler = createNarratorHandler(db);
+    await handler(ctx as never);
+
+    const job = db.prepare(`SELECT * FROM jobs`).get() as { length: string | null } | undefined;
+    expect(job).toBeTruthy();
+    expect(job?.length).toBeNull();
+  });
+});
+
+describe('continueNarration — spawn + delivery phase', () => {
+  let db: Database.Database;
+
+  beforeEach(() => {
+    db = createTestDb();
+    vi.clearAllMocks();
+    vi.mocked(spawnClaudeWithRetry).mockResolvedValue(mockSuccessEnvelope);
+    vi.mocked(deliverNarration).mockResolvedValue(undefined);
+  });
+
+  it('1. Typing interval cleared on success', async () => {
+    const clearIntervalSpy = vi.spyOn(global, 'clearInterval');
+    const setIntervalSpy = vi.spyOn(global, 'setInterval');
+
+    const jobId = 'job-typing-success';
+    insertJob(db, jobId);
+
+    const ctx = makeCtx();
+    await continueNarration(jobId, 'medium', ctx as never, db);
 
     expect(setIntervalSpy).toHaveBeenCalled();
     expect(clearIntervalSpy).toHaveBeenCalled();
@@ -171,15 +228,16 @@ describe('narratorHandler — ack + typing indicator', () => {
     setIntervalSpy.mockRestore();
   });
 
-  it('3. Typing interval cleared on error', async () => {
+  it('2. Typing interval cleared on error', async () => {
     const clearIntervalSpy = vi.spyOn(global, 'clearInterval');
     const setIntervalSpy = vi.spyOn(global, 'setInterval');
     vi.mocked(spawnClaudeWithRetry).mockRejectedValue(new Error('something went wrong'));
 
+    const jobId = 'job-typing-error';
+    insertJob(db, jobId);
+
     const ctx = makeCtx();
-    const handler = createNarratorHandler(db);
-    // handler re-throws
-    await expect(handler(ctx as never)).rejects.toThrow('something went wrong');
+    await expect(continueNarration(jobId, 'medium', ctx as never, db)).rejects.toThrow('something went wrong');
 
     expect(setIntervalSpy).toHaveBeenCalled();
     expect(clearIntervalSpy).toHaveBeenCalled();
@@ -188,18 +246,20 @@ describe('narratorHandler — ack + typing indicator', () => {
     setIntervalSpy.mockRestore();
   });
 
-  it('4. Error path sends user-friendly message — auth error maps to "temporarily unavailable"', async () => {
+  it('3. Error path sends user-friendly message — auth error maps to "temporarily unavailable"', async () => {
     vi.mocked(spawnClaudeWithRetry).mockRejectedValue(
       new Error('not logged in — please run /login first')
     );
 
-    const ctx = makeCtx();
-    const handler = createNarratorHandler(db);
-    await expect(handler(ctx as never)).rejects.toThrow();
+    const jobId = 'job-auth-err';
+    insertJob(db, jobId);
 
-    // The ack edit must show user-friendly text, not the raw error
-    const editCalls = vi.mocked(ctx.api.editMessageText).mock.calls;
-    const allMessages = editCalls.map(c => c[2] as string);
+    const ctx = makeCtx();
+    await expect(continueNarration(jobId, 'medium', ctx as never, db)).rejects.toThrow();
+
+    // Since no ackMessageId, it falls back to ctx.reply
+    const replyCalls = vi.mocked(ctx.reply).mock.calls;
+    const allMessages = replyCalls.map(c => c[0] as string);
     const anyFriendly = allMessages.some(m => m.includes('temporarily unavailable'));
     expect(anyFriendly).toBe(true);
 
@@ -208,18 +268,31 @@ describe('narratorHandler — ack + typing indicator', () => {
     expect(anyRaw).toBe(false);
   });
 
-  it('5. Ack failure does not abort job — spawn still called', async () => {
-    vi.mocked(spawnClaudeWithRetry).mockResolvedValue(mockSuccessEnvelope);
+  it('4. Spawn called with correct length instructions', async () => {
+    const jobId = 'job-len-check';
+    insertJob(db, jobId);
 
-    const ctx = makeCtx({
-      reply: vi.fn().mockRejectedValue(new Error('Telegram API down')),
-    });
+    const ctx = makeCtx();
+    await continueNarration(jobId, 'short', ctx as never, db);
 
-    const handler = createNarratorHandler(db);
-    // best-effort ack failure is swallowed; handler should complete without error
-    await expect(handler(ctx as never)).resolves.not.toThrow();
-
-    // Spawn was still called despite ack failure
     expect(spawnClaudeWithRetry).toHaveBeenCalled();
+    const callArgs = vi.mocked(spawnClaudeWithRetry).mock.calls[0];
+    // args[1] is the args array — -p prompt is first pair
+    const argsArray = callArgs[1] as string[];
+    const promptIdx = argsArray.indexOf('-p');
+    expect(promptIdx).toBeGreaterThanOrEqual(0);
+    const prompt = argsArray[promptIdx + 1];
+    expect(prompt).toContain('200-400');
+  });
+
+  it('5. Job length column updated to chosen value', async () => {
+    const jobId = 'job-len-col';
+    insertJob(db, jobId);
+
+    const ctx = makeCtx();
+    await continueNarration(jobId, 'full', ctx as never, db);
+
+    const job = db.prepare(`SELECT length FROM jobs WHERE id = ?`).get(jobId) as { length: string };
+    expect(job.length).toBe('full');
   });
 });

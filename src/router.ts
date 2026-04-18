@@ -3,7 +3,7 @@ import { getTracer } from './lib/otel.js';
 
 type Handler = (ctx: Context) => Promise<void>;
 
-export function registerHandlers(bot: Bot, handlers: { narrator: Handler }): void {
+export function registerHandlers(bot: Bot, handlers: { narrator: Handler; narratorCallback: Handler }): void {
   // Handler crash boundary: every handler wrapped in try/catch
   bot.on('message', async (ctx) => {
     const tracer = getTracer('narrator');
@@ -12,6 +12,21 @@ export function registerHandlers(bot: Bot, handlers: { narrator: Handler }): voi
       await handlers.narrator(ctx);
     } catch (err) {
       console.error('narrator handler threw', err);
+      span.recordException(err as Error);
+      span.setStatus({ code: 2 /* ERROR */ });
+      // Do NOT re-throw — propagation would kill the bot loop
+    } finally {
+      span.end();
+    }
+  });
+
+  bot.on('callback_query', async (ctx) => {
+    const tracer = getTracer('narrator');
+    const span = tracer.startSpan('handler.narrator.callback');
+    try {
+      await handlers.narratorCallback(ctx);
+    } catch (err) {
+      console.error('narrator callback handler threw', err);
       span.recordException(err as Error);
       span.setStatus({ code: 2 /* ERROR */ });
       // Do NOT re-throw — propagation would kill the bot loop
