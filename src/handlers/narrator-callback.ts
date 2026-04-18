@@ -42,24 +42,18 @@ export function createLengthCallbackHandler(
       return;
     }
 
-    // Atomically consume nonce — any concurrent path gets nothing (TOCTOU fix)
+    // Atomically consume nonce — chat_id constraint prevents cross-chat replay and avoids
+    // consuming a row that belongs to a different chat (row stays intact if chat_id mismatches)
     const pending = db.prepare(
-      `DELETE FROM pending_length_choices WHERE job_id = ? RETURNING *`
-    ).get(jobId) as PendingChoice | undefined;
+      `DELETE FROM pending_length_choices WHERE job_id = ? AND chat_id = ? RETURNING *`
+    ).get(jobId, ctx.chat!.id) as PendingChoice | undefined;
 
     if (!pending) {
-      // Already consumed (race) or never existed
+      // Already consumed (race), never existed, or chat_id mismatch — row not touched in mismatch case
       try {
         await ctx.editMessageText('⏱ Selection expired — already processed or timed out.');
       } catch { /* message may have been deleted */ }
       await ctx.answerCallbackQuery({ text: 'This selection has expired.' });
-      return;
-    }
-
-    // Validate chat_id matches (prevents cross-chat replay)
-    if (ctx.chat?.id !== pending.chat_id) {
-      console.warn(`narrator: callback chat_id mismatch — got ${ctx.chat?.id}, expected ${pending.chat_id}`);
-      try { await ctx.answerCallbackQuery({ text: 'Invalid selection.' }); } catch { /* non-fatal */ }
       return;
     }
 

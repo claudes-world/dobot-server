@@ -379,7 +379,9 @@ async function spawnNarrator(opts: SpawnOptions): Promise<SpawnResult> {
 
 /**
  * Handle /cancel command — aborts active narration for the chat.
- * Edge case: if no active job, replies "Nothing to cancel".
+ * Also handles the keyboard-selection phase: if a pending_length_choices row
+ * exists for this chat, clears the timeout, deletes the row, and cancels the job
+ * before the user's 20s selection window fires.
  */
 export function createCancelHandler(db: Database.Database) {
   return async function cancelHandler(ctx: Context): Promise<void> {
@@ -392,7 +394,42 @@ export function createCancelHandler(db: Database.Database) {
     const active = activeJobs.get(chatId);
 
     if (!active) {
-      await ctx.reply('Nothing to cancel.').catch(() => {});
+      // Check if user is in the keyboard-selection phase (timeout armed but not yet fired)
+      type PendingRow = { job_id: string; chat_id: number; keyboard_msg_id: number | null; source_tmpfile: string; expires_at: number };
+      const pending = db.prepare(
+        `DELETE FROM pending_length_choices WHERE chat_id = ? RETURNING *`
+      ).get(chatId) as PendingRow | undefined;
+
+      if (!pending) {
+        await ctx.reply('Nothing to cancel.').catch(() => {});
+        return;
+      }
+
+      // Clear the armed timeout so default-medium narration never fires
+      const handle = pendingTimeouts.get(pending.job_id);
+      if (handle !== undefined) {
+        clearTimeout(handle);
+        pendingTimeouts.delete(pending.job_id);
+      }
+
+      // Mark job cancelled in DB
+      try {
+        db.prepare(
+          `UPDATE jobs SET status = 'cancelled', completed_at = ?, error = ? WHERE id = ? AND status = 'active'`
+        ).run(Date.now(), 'cancelled by user', pending.job_id);
+      } catch { /* DB may be closing */ }
+
+      // Edit keyboard message to show cancelled
+      if (pending.keyboard_msg_id) {
+        try {
+          await ctx.api.editMessageText(chatId, pending.keyboard_msg_id, 'Cancelled');
+        } catch { /* message may have been deleted */ }
+      }
+
+      // Unlink source temp file
+      try { await fs.unlink(pending.source_tmpfile); } catch { /* already gone */ }
+
+      await ctx.reply('Cancelled.').catch(() => {});
       return;
     }
 
