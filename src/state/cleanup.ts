@@ -22,24 +22,14 @@ export async function startupSweep(db: Database.Database): Promise<void> {
   db.prepare("UPDATE jobs SET subprocess_pid = NULL WHERE status = 'active'").run();
 
   // 2. Mark orphaned active jobs failed — exclude jobs with in-window pending choices
-  //    (those will get timeouts rebuilt by rebuildPendingTimeouts)
+  //    (those will get timeouts rebuilt by rebuildPendingTimeouts).
+  //    Use a correlated subquery to avoid the SQLite 999-parameter limit.
   const now = Date.now();
-  const inWindow = db.prepare(
-    "SELECT job_id FROM pending_length_choices WHERE expires_at >= ?"
-  ).all(now) as { job_id: string }[];
-  const inWindowIds = inWindow.map(r => r.job_id);
-
-  if (inWindowIds.length > 0) {
-    // SQLite doesn't support parameterised IN with arrays via better-sqlite3 directly,
-    // so build placeholders
-    const placeholders = inWindowIds.map(() => '?').join(',');
-    db.prepare(
-      `UPDATE jobs SET status = 'failed', error = 'orphaned on restart'
-       WHERE status = 'active' AND id NOT IN (${placeholders})`
-    ).run(...inWindowIds);
-  } else {
-    db.prepare("UPDATE jobs SET status = 'failed', error = 'orphaned on restart' WHERE status = 'active'").run();
-  }
+  db.prepare(`
+    UPDATE jobs SET status = 'failed', error = 'orphaned on restart'
+    WHERE status = 'active'
+      AND id NOT IN (SELECT job_id FROM pending_length_choices WHERE expires_at >= ?)
+  `).run(now);
 
   // 3. Delete expired pending choices + unlink temp files
   const expired = db.prepare(
