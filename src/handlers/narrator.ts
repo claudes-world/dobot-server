@@ -423,6 +423,11 @@ export function createCancelHandler(db: Database.Database) {
         clearTimeout(handle);
         pendingTimeouts.delete(pending.job_id);
       }
+      try {
+        db.prepare(
+          `UPDATE jobs SET status = 'cancelled', completed_at = ?, error = ? WHERE id = ? AND status = 'active'`
+        ).run(Date.now(), 'cancelled by user', pending.job_id);
+      } catch { /* DB may be closing */ }
       if (pending.keyboard_msg_id) {
         try {
           await ctx.api.editMessageText(chatId, pending.keyboard_msg_id, 'Cancelled');
