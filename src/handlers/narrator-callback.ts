@@ -1,6 +1,7 @@
 import { Context } from 'grammy';
 import Database from 'better-sqlite3';
 import fs from 'node:fs/promises';
+import { pendingTimeouts } from './narrator.js';
 
 interface PendingChoice {
   job_id: string;
@@ -80,6 +81,12 @@ export function createLengthCallbackHandler(
     ).all(pending.chat_id, jobId) as { job_id: string; keyboard_msg_id: number; source_tmpfile: string }[];
 
     for (const other of others) {
+      // Clear stale timeout handle to prevent accumulation (Fix 4: timeout leak)
+      const staleHandle = pendingTimeouts.get(other.job_id);
+      if (staleHandle !== undefined) {
+        clearTimeout(staleHandle);
+        pendingTimeouts.delete(other.job_id);
+      }
       // Disable keyboard UI
       try {
         await ctx.api.editMessageReplyMarkup(pending.chat_id, other.keyboard_msg_id, undefined);

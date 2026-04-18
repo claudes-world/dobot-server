@@ -93,45 +93,49 @@ export function rebuildPendingTimeouts(
     const delay = Math.max(0, row.expires_at - Date.now());
 
     const handle = setTimeout(async () => {
-      // Atomically consume — avoid double-fire with normal callback path
-      const still = db.prepare(`DELETE FROM pending_length_choices WHERE job_id = ? RETURNING *`).get(row.job_id);
-      pendingTimeouts.delete(row.job_id);
-      if (!still) return; // already handled by callback
+      try {
+        // Atomically consume — avoid double-fire with normal callback path
+        const still = db.prepare(`DELETE FROM pending_length_choices WHERE job_id = ? RETURNING *`).get(row.job_id);
+        pendingTimeouts.delete(row.job_id);
+        if (!still) return; // already handled by callback
 
-      const { job_id: jobId, chat_id: chatId, keyboard_msg_id: ackMessageId } = row;
+        const { job_id: jobId, chat_id: chatId, keyboard_msg_id: ackMessageId } = row;
 
-      // Edit ack message to indicate timeout
-      if (ackMessageId) {
-        try {
-          await api.editMessageText(chatId, ackMessageId, 'Timed out — using default (medium)');
-        } catch { /* swallow — message may be gone */ }
+        // Edit ack message to indicate timeout
+        if (ackMessageId) {
+          try {
+            await api.editMessageText(chatId, ackMessageId, 'Timed out — using default (medium)');
+          } catch { /* swallow — message may be gone */ }
+        }
+
+        // Look up userId from jobs table (needed to construct synthetic Context)
+        const jobRow = db.prepare(`SELECT user_id FROM jobs WHERE id = ?`).get(jobId) as JobRow | undefined;
+        if (!jobRow) {
+          console.warn(`rebuildPendingTimeouts: no job row for ${jobId} — cannot continue narration`);
+          try { await fs.unlink(row.source_tmpfile); } catch { /* gone */ }
+          return;
+        }
+
+        // Build a synthetic Update so continueNarration gets a proper Context
+        const syntheticUpdate: Update = {
+          update_id: 0,
+          message: {
+            message_id: 0,
+            date: Math.floor(Date.now() / 1000),
+            chat: { id: chatId, type: 'private' },
+            from: {
+              id: jobRow.user_id,
+              is_bot: false,
+              first_name: '',
+            },
+          } as Update['message'],
+        };
+
+        const ctx = new Context(syntheticUpdate, api, me);
+        await onTimeout(jobId, 'medium', ctx);
+      } catch (err) {
+        console.error(`rebuildPendingTimeouts: unhandled error in timeout for job ${row.job_id}:`, err);
       }
-
-      // Look up userId from jobs table (needed to construct synthetic Context)
-      const jobRow = db.prepare(`SELECT user_id FROM jobs WHERE id = ?`).get(jobId) as JobRow | undefined;
-      if (!jobRow) {
-        console.warn(`rebuildPendingTimeouts: no job row for ${jobId} — cannot continue narration`);
-        try { await fs.unlink(row.source_tmpfile); } catch { /* gone */ }
-        return;
-      }
-
-      // Build a synthetic Update so continueNarration gets a proper Context
-      const syntheticUpdate: Update = {
-        update_id: 0,
-        message: {
-          message_id: 0,
-          date: Math.floor(Date.now() / 1000),
-          chat: { id: chatId, type: 'private' },
-          from: {
-            id: jobRow.user_id,
-            is_bot: false,
-            first_name: '',
-          },
-        } as Update['message'],
-      };
-
-      const ctx = new Context(syntheticUpdate, api, me);
-      await onTimeout(jobId, 'medium', ctx);
     }, delay);
 
     pendingTimeouts.set(row.job_id, handle);

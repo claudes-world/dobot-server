@@ -123,16 +123,20 @@ export function createNarratorHandler(db: Database.Database) {
 
       // 6. Default timeout — use medium if user doesn't tap within lengthTimeoutMs
       const timeoutHandle = setTimeout(async () => {
-        const still = db.prepare(`SELECT * FROM pending_length_choices WHERE job_id = ?`).get(jobId);
-        pendingTimeouts.delete(jobId); // Always clean up map entry (MEDIUM-1: prevent leak on early return)
-        if (!still) return; // already handled by callback
-        db.prepare(`DELETE FROM pending_length_choices WHERE job_id = ?`).run(jobId);
-        if (ackMessageId) {
-          try {
-            await ctx.api.editMessageText(chatId, ackMessageId, 'Timed out — using default (medium)');
-          } catch { /* swallow */ }
+        try {
+          // Atomically consume — avoids SELECT+DELETE race with callback path
+          const still = db.prepare(`DELETE FROM pending_length_choices WHERE job_id = ? RETURNING *`).get(jobId);
+          pendingTimeouts.delete(jobId); // Always clean up map entry (MEDIUM-1: prevent leak on early return)
+          if (!still) return; // already handled by callback
+          if (ackMessageId) {
+            try {
+              await ctx.api.editMessageText(chatId, ackMessageId, 'Timed out — using default (medium)');
+            } catch { /* swallow */ }
+          }
+          await continueNarration(jobId, 'medium', ctx, db);
+        } catch (err) {
+          console.error(`narrator: unhandled error in timeout for job ${jobId}:`, err);
         }
-        await continueNarration(jobId, 'medium', ctx, db);
       }, config.narrator.lengthTimeoutMs);
 
       pendingTimeouts.set(jobId, timeoutHandle);
