@@ -93,11 +93,12 @@ function isAuthError(envelope: ClaudeEnvelope | null, thrownMsg: string): boolea
  * On auth errors the process may exit non-zero but still write valid JSON to
  * stdout — we parse stdout from the caught ExecaError in that case.
  *
- * @param runScript - Path to the agent run script (e.g. narrator/run.sh)
- * @param args      - CLI args to pass to the script
- * @param input     - stdin content
- * @param env       - subprocess env (use buildSubprocessEnv)
- * @param timeout   - timeout in ms
+ * @param runScript   - Path to the agent run script (e.g. narrator/run.sh)
+ * @param args        - CLI args to pass to the script
+ * @param input       - stdin content
+ * @param env         - subprocess env (use buildSubprocessEnv)
+ * @param timeout     - timeout in ms
+ * @param abortSignal - optional AbortSignal to cancel the subprocess
  */
 export async function spawnClaudeWithRetry(
   runScript: string,
@@ -105,6 +106,7 @@ export async function spawnClaudeWithRetry(
   input: string,
   env: NodeJS.ProcessEnv,
   timeout: number,
+  abortSignal?: AbortSignal,
 ): Promise<{ envelope: ClaudeEnvelope; retried: boolean }> {
   let retried = false;
 
@@ -113,6 +115,9 @@ export async function spawnClaudeWithRetry(
     let thrownMsg = '';
 
     try {
+      if (abortSignal?.aborted) {
+        throw new Error('aborted');
+      }
       const proc = await execa(runScript, args, {
         input,
         extendEnv: false,
@@ -120,6 +125,7 @@ export async function spawnClaudeWithRetry(
         timeout,
         cleanup: true,
         killSignal: 'SIGKILL',
+        cancelSignal: abortSignal,
       });
 
       try {

@@ -28,6 +28,16 @@ const tracer = getTracer('narrator');
 // Module-scoped map so callback handler and startup rebuild can clearTimeout by jobId
 export const pendingTimeouts = new Map<string, ReturnType<typeof setTimeout>>();
 
+/** Active narration state per chat — keyed by chat_id. */
+interface ActiveJob {
+  controller: AbortController;
+  jobId: string;
+  ackMessageId: number | undefined;
+}
+
+/** Map of chat_id → active narration. Populated at start of continueNarration, cleared on finish/cancel. */
+export const activeJobs = new Map<number, ActiveJob>();
+
 function userFacingError(err: unknown): string {
   const msg = String(err);
   if (/not logged in|login|401|authentication|oauth/i.test(msg)) {
@@ -159,6 +169,9 @@ export async function continueNarration(
 
   const chatId = ctx.chat?.id ?? (ctx.callbackQuery?.message?.chat.id) ?? userId;
 
+  // Register AbortController for this active job — /cancel uses this map
+  const controller = new AbortController();
+
   // Update job row with chosen length
   db.prepare(`UPDATE jobs SET length = ? WHERE id = ?`).run(length, jobId);
 
@@ -203,6 +216,9 @@ export async function continueNarration(
   // We need ackMessageId for error editing — look it up from pendingRow or skip
   const ackMessageId = pendingRow?.keyboard_msg_id;
 
+  // Register active job — /cancel reads this map
+  activeJobs.set(chatId, { controller, jobId, ackMessageId });
+
   try {
     // Build system prompt file
     sysTmpFile = path.join(config.narrator.tmpDir, `narrator-sys-${jobId}.md`);
@@ -226,6 +242,7 @@ export async function continueNarration(
         sourceText,
         userPrompt,
         timeout: config.narrator.claudeTimeout,
+        abortSignal: controller.signal,
       });
       span.setAttribute('claude_stop_reason', r.envelope.stop_reason ?? 'unknown');
       const usage = (r.envelope as unknown as Record<string, unknown>)['usage'] as
@@ -282,26 +299,37 @@ export async function continueNarration(
       ctx,
       db,
       ackMessageId,
+      abortSignal: controller.signal,
     });
 
   } catch (err: unknown) {
-    // Edit ack or send new message with user-friendly error
-    const friendlyMsg = `❌ ${userFacingError(err)}`;
-    if (ackMessageId) {
+    const errMsg = String(err);
+    // Check if aborted by /cancel — don't overwrite the 'cancelled' status set by cancelHandler
+    const wasCancelled = controller.signal.aborted || /aborted|cancel/i.test(errMsg);
+    if (!wasCancelled) {
+      // Edit ack or send new message with user-friendly error
+      const friendlyMsg = `❌ ${userFacingError(err)}`;
+      if (ackMessageId) {
+        try {
+          await ctx.api.editMessageText(chatId, ackMessageId, friendlyMsg);
+        } catch { /* swallow */ }
+      } else {
+        await ctx.reply(friendlyMsg).catch(() => {});
+      }
+      // Update job row to failed
       try {
-        await ctx.api.editMessageText(chatId, ackMessageId, friendlyMsg);
-      } catch { /* swallow */ }
-    } else {
-      await ctx.reply(friendlyMsg).catch(() => {});
+        db.prepare(`
+          UPDATE jobs SET status = 'failed', completed_at = ?, error = ? WHERE id = ?
+        `).run(Date.now(), String(err), jobId);
+      } catch { /* DB may be closing */ }
+      throw err; // re-throw so router crash boundary logs it
     }
-    // Update job row to failed
-    try {
-      db.prepare(`
-        UPDATE jobs SET status = 'failed', completed_at = ?, error = ? WHERE id = ?
-      `).run(Date.now(), String(err), jobId);
-    } catch { /* DB may be closing */ }
-    throw err; // re-throw so router crash boundary logs it
+    // If cancelled, cancelHandler already updated the job row — swallow the abort error
   } finally {
+    // Always remove from activeJobs map — only if we still own this slot
+    if (activeJobs.get(chatId)?.jobId === jobId) {
+      activeJobs.delete(chatId);
+    }
     clearInterval(typingInterval);
     if (sysTmpFile) {
       try { await fs.unlink(sysTmpFile); } catch { /* already gone */ }
@@ -318,6 +346,7 @@ interface SpawnOptions {
   sourceText: string;
   userPrompt: string;
   timeout: number;
+  abortSignal?: AbortSignal;
 }
 
 interface SpawnResult {
@@ -339,5 +368,47 @@ async function spawnNarrator(opts: SpawnOptions): Promise<SpawnResult> {
   const env = buildSubprocessEnv(process.env, {
     CLAUDE_CODE_MAX_OUTPUT_TOKENS: '12000',
   });
-  return spawnClaudeWithRetry(opts.runScript, args, opts.sourceText, env, opts.timeout);
+  return spawnClaudeWithRetry(opts.runScript, args, opts.sourceText, env, opts.timeout, opts.abortSignal);
+}
+
+/**
+ * Handle /cancel command — aborts active narration for the chat.
+ * Edge case: if no active job, replies "Nothing to cancel".
+ */
+export function createCancelHandler(db: Database.Database) {
+  return async function cancelHandler(ctx: Context): Promise<void> {
+    const userId = ctx.from?.id;
+    if (!userId) return;
+
+    if (!config.narrator.allowedUserIds.has(userId)) return;
+
+    const chatId = ctx.chat!.id;
+    const active = activeJobs.get(chatId);
+
+    if (!active) {
+      await ctx.reply('Nothing to cancel.').catch(() => {});
+      return;
+    }
+
+    const { controller, jobId, ackMessageId } = active;
+
+    // Abort the subprocess and md-speak
+    controller.abort();
+
+    // Mark job cancelled in DB
+    try {
+      db.prepare(`
+        UPDATE jobs SET status = 'cancelled', completed_at = ?, error = ? WHERE id = ? AND status = 'active'
+      `).run(Date.now(), 'cancelled by user', jobId);
+    } catch { /* DB may be closing */ }
+
+    // Edit ack message to show cancelled
+    if (ackMessageId) {
+      try {
+        await ctx.api.editMessageText(chatId, ackMessageId, 'Cancelled');
+      } catch { /* message may have been deleted */ }
+    }
+
+    await ctx.reply('Cancelled.').catch(() => {});
+  };
 }

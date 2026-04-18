@@ -3,7 +3,26 @@ import { getTracer } from './lib/otel.js';
 
 type Handler = (ctx: Context) => Promise<void>;
 
-export function registerHandlers(bot: Bot, handlers: { narrator: Handler; narratorCallback: Handler }): void {
+export function registerHandlers(bot: Bot, handlers: {
+  narrator: Handler;
+  narratorCallback: Handler;
+  cancel: Handler;
+}): void {
+  // /cancel command — registered before generic message handler so it fires first
+  bot.command('cancel', async (ctx) => {
+    const tracer = getTracer('narrator');
+    const span = tracer.startSpan('handler.narrator.cancel');
+    try {
+      await handlers.cancel(ctx);
+    } catch (err) {
+      console.error('cancel handler threw', err);
+      span.recordException(err as Error);
+      span.setStatus({ code: 2 /* ERROR */ });
+    } finally {
+      span.end();
+    }
+  });
+
   // Handler crash boundary: every handler wrapped in try/catch
   bot.on('message', async (ctx) => {
     const tracer = getTracer('narrator');

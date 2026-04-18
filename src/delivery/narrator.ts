@@ -16,10 +16,11 @@ export interface DeliveryOptions {
   ctx: Context;
   db: Database.Database;
   ackMessageId?: number;
+  abortSignal?: AbortSignal;
 }
 
 export async function deliverNarration(opts: DeliveryOptions): Promise<void> {
-  const { jobId, userId, narrative, stopReason, ctx, db, ackMessageId } = opts;
+  const { jobId, userId, narrative, stopReason, ctx, db, ackMessageId, abortSignal } = opts;
 
   // 1. Build story file path
   const now = new Date();
@@ -61,6 +62,9 @@ export async function deliverNarration(opts: DeliveryOptions): Promise<void> {
 
   const mdSpeakStart = Date.now();
   try {
+    if (abortSignal?.aborted) {
+      throw new Error('aborted');
+    }
     await execa('md-speak', ['--no-describe', mdPath], {
       extendEnv: false,
       env: buildSubprocessEnv(process.env, {
@@ -70,6 +74,7 @@ export async function deliverNarration(opts: DeliveryOptions): Promise<void> {
       timeout: config.narrator.mdSpeakTimeout,
       cleanup: true,
       killSignal: 'SIGKILL',
+      cancelSignal: abortSignal,
     });
     ttsDurationMs = Date.now() - mdSpeakStart;
     // Check if mp3 was generated
