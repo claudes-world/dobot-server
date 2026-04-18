@@ -16,10 +16,11 @@ export interface DeliveryOptions {
   ctx: Context;
   db: Database.Database;
   ackMessageId?: number;
+  abortSignal?: AbortSignal;
 }
 
 export async function deliverNarration(opts: DeliveryOptions): Promise<void> {
-  const { jobId, userId, narrative, stopReason, ctx, db, ackMessageId } = opts;
+  const { jobId, userId, narrative, stopReason, ctx, db, ackMessageId, abortSignal } = opts;
 
   // 1. Build story file path
   const now = new Date();
@@ -51,7 +52,7 @@ export async function deliverNarration(opts: DeliveryOptions): Promise<void> {
   await fs.writeFile(mdPath, finalNarrative);
 
   // 2. Construct CPC deep link directly from mdPath
-  const deepLink: string = `https://cpc.claude.do/#file=${encodeURIComponent(mdPath)}`;
+  const deepLink: string = `https://t.me/claude_do_bot/pocket?startapp=${encodeURIComponent(mdPath)}`;
 
   // 3. Invoke md-speak --no-describe to generate audio
   const mp3Path = mdPath.replace(/\.md$/, '.mp3');
@@ -61,6 +62,9 @@ export async function deliverNarration(opts: DeliveryOptions): Promise<void> {
 
   const mdSpeakStart = Date.now();
   try {
+    if (abortSignal?.aborted) {
+      throw new Error('aborted');
+    }
     await execa('md-speak', ['--no-describe', mdPath], {
       extendEnv: false,
       env: buildSubprocessEnv(process.env, {
@@ -70,6 +74,7 @@ export async function deliverNarration(opts: DeliveryOptions): Promise<void> {
       timeout: config.narrator.mdSpeakTimeout,
       cleanup: true,
       killSignal: 'SIGKILL',
+      cancelSignal: abortSignal,
     });
     ttsDurationMs = Date.now() - mdSpeakStart;
     // Check if mp3 was generated

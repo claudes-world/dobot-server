@@ -26,5 +26,6 @@ export const config = {
     tmpDir: optional('NARRATOR_TMP_DIR', '/tmp'),
     maxJobsPerHour: Number(optional('NARRATOR_MAX_JOBS_PER_HOUR', '10')),
     maxDailyTtsUsd: Number(optional('NARRATOR_MAX_DAILY_TTS_USD', '5.00')),
+    lengthTimeoutMs: Number(optional('NARRATOR_LENGTH_TIMEOUT', '20')) * 1000,
   },
 };

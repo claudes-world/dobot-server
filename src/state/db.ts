@@ -27,5 +27,11 @@ export function openDatabase(dbPath: string): Database.Database {
     db.pragma('user_version = 2');
   }
 
+  if (version < 3) {
+    const migration3 = fs.readFileSync(path.resolve(__dirname, '../../migrations/003-pending-length-choices.sql'), 'utf8');
+    db.exec(migration3);
+    db.pragma('user_version = 3');
+  }
+
   return db;
 }
