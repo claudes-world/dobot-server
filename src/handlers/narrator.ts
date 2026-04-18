@@ -25,8 +25,8 @@ const LENGTH_INSTRUCTIONS: Record<'short' | 'medium' | 'full', string> = {
 
 const tracer = getTracer('narrator');
 
-// Module-scoped map so callback handler can clearTimeout by jobId
-const pendingTimeouts = new Map<string, ReturnType<typeof setTimeout>>();
+// Module-scoped map so callback handler and startup rebuild can clearTimeout by jobId
+export const pendingTimeouts = new Map<string, ReturnType<typeof setTimeout>>();
 
 function userFacingError(err: unknown): string {
   const msg = String(err);
