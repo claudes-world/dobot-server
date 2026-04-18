@@ -20,6 +20,20 @@ Respond ONLY with the narrative prose — do not write files, do not include pre
 
 const tracer = getTracer('narrator');
 
+function userFacingError(err: unknown): string {
+  const msg = String(err);
+  if (/not logged in|login|401|authentication|oauth/i.test(msg)) {
+    return 'Narration service temporarily unavailable. Try again in a moment.';
+  }
+  if (/timeout|timed out/i.test(msg)) {
+    return 'Narration timed out. Try a shorter text.';
+  }
+  if (/too large|max_tokens|12k/i.test(msg)) {
+    return 'Source text too long. Try a shorter excerpt.';
+  }
+  return 'Something went wrong. Try again or contact the orchestrator.';
+}
+
 export function createNarratorHandler(db: Database.Database) {
   return async function narratorHandler(ctx: Context): Promise<void> {
     const userId = ctx.from?.id;
@@ -55,6 +69,33 @@ export function createNarratorHandler(db: Database.Database) {
       INSERT INTO jobs (id, handler, chat_id, user_id, started_at, status, source_kind, tone, shape, length)
       VALUES (?, 'narrator', ?, ?, ?, 'active', 'text', 'serious', 'origin-story', 'medium')
     `).run(jobId, ctx.chat?.id ?? userId, userId, now);
+
+    // Best-effort ack (don't abort job if ack fails)
+    let ackMessageId: number | undefined;
+    const chatId = ctx.chat!.id;
+    try {
+      const ackMsg = await ctx.reply('Got your text. Generating narration...', {
+        reply_parameters: { message_id: ctx.message!.message_id },
+      });
+      ackMessageId = ackMsg.message_id;
+    } catch (ackErr) {
+      console.warn('narrator: ack send failed (best-effort):', ackErr);
+    }
+
+    // Typing indicator — record_voice shows "recording voice message..."
+    let typingInterval: ReturnType<typeof setInterval> | undefined;
+    try {
+      await ctx.api.sendChatAction(chatId, 'record_voice');
+    } catch { /* ignore */ }
+    typingInterval = setInterval(async () => {
+      try {
+        await ctx.api.sendChatAction(chatId, 'record_voice');
+      } catch {
+        // On failure, clear interval, don't retry
+        clearInterval(typingInterval);
+        typingInterval = undefined;
+      }
+    }, 4000);
 
     let sysTmpFile: string | null = null;
 
@@ -99,7 +140,15 @@ export function createNarratorHandler(db: Database.Database) {
           db.prepare(`UPDATE jobs SET status = 'failed', completed_at = ?, stop_reason = ?, error = ? WHERE id = ?`)
             .run(Date.now(), envelope.stop_reason ?? null, envelope.result.slice(0, 500), jobId);
         } catch { /* DB may be closing */ }
-        // Write error text so DB is diagnosable without log scraping
+        // Notify user via ack edit or new message
+        if (ackMessageId) {
+          try {
+            await ctx.api.editMessageText(chatId, ackMessageId,
+              `❌ Narration failed: Claude returned an error (${envelope.stop_reason ?? 'unknown'})`);
+          } catch { /* swallow */ }
+        } else {
+          await ctx.reply(`❌ Narration failed: Claude returned an error.`).catch(() => {});
+        }
         return;
       }
 
@@ -127,9 +176,19 @@ export function createNarratorHandler(db: Database.Database) {
         stopReason,
         ctx,
         db,
+        ackMessageId,
       });
 
     } catch (err: unknown) {
+      // Edit ack or send new message with user-friendly error
+      const friendlyMsg = `❌ ${userFacingError(err)}`;
+      if (ackMessageId) {
+        try {
+          await ctx.api.editMessageText(chatId, ackMessageId, friendlyMsg);
+        } catch { /* swallow */ }
+      } else {
+        await ctx.reply(friendlyMsg).catch(() => {});
+      }
       // Update job row to failed — any unhandled throw reaches here
       try {
         db.prepare(`
@@ -138,6 +197,7 @@ export function createNarratorHandler(db: Database.Database) {
       } catch { /* DB may be closing */ }
       throw err;  // re-throw so router crash boundary logs it
     } finally {
+      clearInterval(typingInterval);
       if (sysTmpFile) {
         try { await fs.unlink(sysTmpFile); } catch { /* already gone */ }
       }
