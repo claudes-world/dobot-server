@@ -5,6 +5,7 @@ import { registerHandlers } from '../src/router.js';
 function makeFakeBot() {
   let messageHandler: ((ctx: unknown) => Promise<void>) | null = null;
   const bot = {
+    command: vi.fn(),
     on: (event: string, fn: (ctx: unknown) => Promise<void>) => {
       if (event === 'message') messageHandler = fn;
     },
@@ -42,21 +43,21 @@ describe('router crash boundary', () => {
     const narrator = vi.fn().mockImplementation(() => {
       throw new Error('synthetic');
     });
-    registerHandlers(bot, { narrator });
+    registerHandlers(bot, { narrator, narratorCallback: vi.fn(), cancel: vi.fn() });
     await expect(bot.fire(makeCtx())).resolves.not.toThrow();
   });
 
   it('catches async handler throw', async () => {
     const bot = makeFakeBot();
     const narrator = vi.fn().mockRejectedValue(new Error('async-throw'));
-    registerHandlers(bot, { narrator });
+    registerHandlers(bot, { narrator, narratorCallback: vi.fn(), cancel: vi.fn() });
     await expect(bot.fire(makeCtx())).resolves.not.toThrow();
   });
 
   it('catches rejected promise return', async () => {
     const bot = makeFakeBot();
     const narrator = vi.fn().mockReturnValue(Promise.reject(new Error('rejected')));
-    registerHandlers(bot, { narrator });
+    registerHandlers(bot, { narrator, narratorCallback: vi.fn(), cancel: vi.fn() });
     await expect(bot.fire(makeCtx())).resolves.not.toThrow();
   });
 
@@ -79,7 +80,7 @@ describe('router crash boundary', () => {
     try {
       const bot = makeFakeBot();
       const narrator = vi.fn().mockRejectedValue(new Error('otel-test'));
-      registerHandlersMocked(bot, { narrator });
+      registerHandlersMocked(bot, { narrator, narratorCallback: vi.fn(), cancel: vi.fn() });
       await bot.fire(makeCtx());
 
       // span.end() must be called via finally even on handler throw
@@ -97,7 +98,7 @@ describe('router crash boundary', () => {
     const narrator = vi.fn().mockImplementation(async (c: typeof ctx) => {
       await (c as typeof ctx).reply('test');
     });
-    registerHandlers(bot, { narrator });
+    registerHandlers(bot, { narrator, narratorCallback: vi.fn(), cancel: vi.fn() });
     await expect(bot.fire(ctx)).resolves.not.toThrow();
   });
 
