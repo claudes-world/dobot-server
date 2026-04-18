@@ -21,5 +21,11 @@ export function openDatabase(dbPath: string): Database.Database {
     db.pragma('user_version = 1');
   }
 
+  if (version < 2) {
+    const migration2 = fs.readFileSync(path.resolve(__dirname, '../../migrations/002-tts-failed.sql'), 'utf8');
+    db.exec(migration2);
+    db.pragma('user_version = 2');
+  }
+
   return db;
 }

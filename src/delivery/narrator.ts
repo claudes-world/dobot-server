@@ -15,10 +15,11 @@ export interface DeliveryOptions {
   stopReason: string;
   ctx: Context;
   db: Database.Database;
+  ackMessageId?: number;
 }
 
 export async function deliverNarration(opts: DeliveryOptions): Promise<void> {
-  const { jobId, userId, narrative, stopReason, ctx, db } = opts;
+  const { jobId, userId, narrative, stopReason, ctx, db, ackMessageId } = opts;
 
   // 1. Build story file path
   const now = new Date();
@@ -127,9 +128,24 @@ export async function deliverNarration(opts: DeliveryOptions): Promise<void> {
         await ctx.reply(`${caption}\n\n(Audio too large to send directly — ${Math.round(mp3Size / 1_000_000)}MB)`, { reply_markup: keyboard });
       }
     }
+
+    // Audio delivered — edit ack to show completion
+    if (ackMessageId) {
+      try {
+        await ctx.api.editMessageText(ctx.chat!.id, ackMessageId, '✅ Narration complete');
+      } catch { /* swallow — ack message may have been deleted */ }
+    }
   } else {
-    // No audio: deliver markdown only
-    await ctx.reply(`${caption}\n\n(Audio generation failed — see logs)`, { reply_markup: keyboard });
+    // No audio — send narrative link with partial-success message
+    const partialMsg = `✅ Narrative generated\n❌ Audio failed — text too long for TTS or service error\n\nRead via the button below.`;
+    await ctx.reply(partialMsg, { reply_markup: keyboard });
+
+    // Edit ack to reflect partial success
+    if (ackMessageId) {
+      try {
+        await ctx.api.editMessageText(ctx.chat!.id, ackMessageId, '✅ Narration complete (text only — audio unavailable)');
+      } catch { /* swallow — ack message may have been deleted */ }
+    }
   }
 
   // Suppress unused variable warning — ttsDurationMs is available for future telemetry
@@ -145,9 +161,10 @@ export async function deliverNarration(opts: DeliveryOptions): Promise<void> {
         completed_at = ?,
         output_path = ?,
         tts_chars = ?,
-        tts_usd = ?
+        tts_usd = ?,
+        tts_failed = ?
       WHERE id = ? AND status = 'active'
-    `).run(Date.now(), mdPath, ttsChars, ttsUsd, jobId);
+    `).run(Date.now(), mdPath, ttsChars, ttsUsd, audioGenerated ? 0 : 1, jobId);
     if ((result as { changes: number }).changes === 0) {
       console.warn(`narrator: job ${jobId} status was not active at completion — skipping completed update`);
     } else if (ttsUsd > 0) {
