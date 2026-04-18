@@ -2,11 +2,21 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-const ALLOWED_PREFIXES = [
+const DEFAULT_ALLOWED_PREFIXES = [
   "/home/claude/claudes-world/",
   "/home/claude/code/",
   "/home/claude/shared/public/",
 ];
+
+/** Returns the active allowed-prefix list.
+ * Tests may override via PATH_VALIDATOR_ALLOWED_PREFIXES (comma-separated). */
+function getAllowedPrefixes(): string[] {
+  const env = process.env.PATH_VALIDATOR_ALLOWED_PREFIXES;
+  if (env) {
+    return env.split(',').map(p => p.trim()).filter(Boolean);
+  }
+  return DEFAULT_ALLOWED_PREFIXES;
+}
 const DENY_PATTERNS = [/\.secrets/, /\.ssh/, /\.gnupg/, /\.credentials\.json$/, /\.env$/];
 const ALLOWED_EXT = [".md", ".txt", ".rst", ".org"];
 const MAX_SOURCE_BYTES = 500 * 1024;
@@ -22,7 +32,7 @@ export function validateFilePath(userPath: string): string {
     throw new Error(`Path does not exist or cannot be resolved: ${expanded}`);
   }
   // 3. Allowlist prefix check
-  if (!ALLOWED_PREFIXES.some(prefix => resolved.startsWith(prefix))) {
+  if (!getAllowedPrefixes().some(prefix => resolved.startsWith(prefix))) {
     throw new Error(`Path not in allowed prefix list: ${resolved}`);
   }
   // 4. Deny pattern check

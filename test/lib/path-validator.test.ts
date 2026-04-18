@@ -4,11 +4,15 @@ import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { validateFilePath } from '../../src/lib/path-validator.js';
 
-const FIXTURE_DIR = '/home/claude/claudes-world/.world/test-fixtures';
+// Use temp directories so tests work on any machine / CI runner.
+// The PID suffix avoids collisions between parallel test runs.
+const FIXTURE_DIR = path.join(os.tmpdir(), `path-validator-test-${process.pid}`);
+// Tilde-expansion requires a file reachable via ~, so we use a subdir of os.homedir().
+const HOME_FIXTURE_DIR = path.join(os.homedir(), `.path-validator-test-${process.pid}`);
 
 // Fixture paths
 const validFile = path.join(FIXTURE_DIR, 'valid-test.md');
-const tildeFile = path.join(FIXTURE_DIR, 'tilde-test.md');
+const tildeFile = path.join(HOME_FIXTURE_DIR, 'tilde-test.md');
 const oversizedFile = path.join(FIXTURE_DIR, 'oversized-test.md');
 const symlinkInAllowed = path.join(FIXTURE_DIR, 'symlink-escape.md');
 // Wrong extension inside allowed prefix so it reaches the extension check
@@ -17,13 +21,19 @@ const wrongExtInAllowed = path.join(FIXTURE_DIR, 'wrong-ext-test.py');
 const deniedEnvFile = path.join(FIXTURE_DIR, 'test.env');
 
 beforeAll(() => {
-  // Ensure fixture directory exists (host-agnostic safety)
+  // Allow the temp fixture dirs so the validator accepts these paths on any machine.
+  process.env.PATH_VALIDATOR_ALLOWED_PREFIXES = [
+    FIXTURE_DIR + '/',
+    HOME_FIXTURE_DIR + '/',
+  ].join(',');
+
   fs.mkdirSync(FIXTURE_DIR, { recursive: true });
+  fs.mkdirSync(HOME_FIXTURE_DIR, { recursive: true });
 
   // 1. Valid .md file
   fs.writeFileSync(validFile, '# Test fixture\n');
 
-  // 3. Tilde test file
+  // 3. Tilde test file (lives under os.homedir() so ~ expansion reaches it)
   fs.writeFileSync(tildeFile, '# Tilde test fixture\n');
 
   // 4. Deny pattern — create a real .env file so realpathSync succeeds and deny check fires
@@ -44,10 +54,13 @@ beforeAll(() => {
 });
 
 afterAll(() => {
+  delete process.env.PATH_VALIDATOR_ALLOWED_PREFIXES;
   for (const f of [validFile, tildeFile, oversizedFile, wrongExtInAllowed, deniedEnvFile]) {
     try { fs.unlinkSync(f); } catch { /* ignore */ }
   }
   try { fs.unlinkSync(symlinkInAllowed); } catch { /* ignore */ }
+  try { fs.rmdirSync(FIXTURE_DIR); } catch { /* ignore */ }
+  try { fs.rmdirSync(HOME_FIXTURE_DIR); } catch { /* ignore */ }
 });
 
 describe('validateFilePath', () => {
@@ -61,7 +74,7 @@ describe('validateFilePath', () => {
   });
 
   it('3. tilde expansion — resolves correctly', () => {
-    const tildePath = tildeFile.replace('/home/claude', '~');
+    const tildePath = tildeFile.replace(os.homedir(), '~');
     const result = validateFilePath(tildePath);
     expect(result).toBe(tildeFile);
   });
@@ -79,7 +92,7 @@ describe('validateFilePath', () => {
   });
 
   it('7. nonexistent path — throws', () => {
-    expect(() => validateFilePath('/home/claude/claudes-world/nonexistent-99999.md')).toThrow();
+    expect(() => validateFilePath(path.join(FIXTURE_DIR, 'nonexistent-99999.md'))).toThrow();
   });
 
   it('8. path outside allowed prefix (direct, no symlink) — throws with prefix error', () => {
