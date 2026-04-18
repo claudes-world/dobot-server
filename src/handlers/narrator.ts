@@ -42,6 +42,9 @@ export function createNarratorHandler(db: Database.Database) {
     // 1. Filter — silently reject if not in allowlist
     if (!config.narrator.allowedUserIds.has(userId)) return;
 
+    // 2. DM-only — silently reject group/supergroup/channel messages (#47)
+    if (ctx.chat?.type !== "private") return;
+
     const sourceText = ctx.message?.text;
     if (!sourceText) return;
 
