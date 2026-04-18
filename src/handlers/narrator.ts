@@ -393,64 +393,52 @@ export function createCancelHandler(db: Database.Database) {
     const chatId = ctx.chat!.id;
     const active = activeJobs.get(chatId);
 
+    // 1. Consume all pending keyboard rows for this chat (unconditionally)
     type PendingRow = { job_id: string; chat_id: number; keyboard_msg_id: number | null; source_tmpfile: string; expires_at: number };
     const pendingRows = db.prepare(
       `DELETE FROM pending_length_choices WHERE chat_id = ? RETURNING *`
     ).all(chatId) as PendingRow[];
 
-    if (!active) {
-      if (pendingRows.length === 0) {
-        await ctx.reply('Nothing to cancel.').catch(() => {});
-        return;
+    // 2. Cleanup every pending row unconditionally
+    for (const pending of pendingRows) {
+      const handle = pendingTimeouts.get(pending.job_id);
+      if (handle !== undefined) {
+        clearTimeout(handle);
+        pendingTimeouts.delete(pending.job_id);
       }
-
-      for (const pending of pendingRows) {
-        // Clear the armed timeout so default-medium narration never fires
-        const handle = pendingTimeouts.get(pending.job_id);
-        if (handle !== undefined) {
-          clearTimeout(handle);
-          pendingTimeouts.delete(pending.job_id);
-        }
-
-        // Mark job cancelled in DB
+      try {
+        db.prepare(
+          `UPDATE jobs SET status = 'cancelled', completed_at = ?, error = ? WHERE id = ? AND status = 'active'`
+        ).run(Date.now(), 'cancelled by user', pending.job_id);
+      } catch { /* DB may be closing */ }
+      if (pending.keyboard_msg_id) {
         try {
-          db.prepare(
-            `UPDATE jobs SET status = 'cancelled', completed_at = ?, error = ? WHERE id = ? AND status = 'active'`
-          ).run(Date.now(), 'cancelled by user', pending.job_id);
-        } catch { /* DB may be closing */ }
-
-        // Edit keyboard message to show cancelled
-        if (pending.keyboard_msg_id) {
-          try {
-            await ctx.api.editMessageText(chatId, pending.keyboard_msg_id, 'Cancelled');
-          } catch { /* message may have been deleted */ }
-        }
-
-        // Unlink source temp file
-        try { await fs.unlink(pending.source_tmpfile); } catch { /* already gone */ }
+          await ctx.api.editMessageText(chatId, pending.keyboard_msg_id, 'Cancelled');
+        } catch { /* message may have been deleted */ }
       }
+      try { await fs.unlink(pending.source_tmpfile); } catch { /* already gone */ }
+    }
 
-      await ctx.reply('Cancelled.').catch(() => {});
+    // 3. Nothing to cancel if no active job and no pending rows
+    if (!active && pendingRows.length === 0) {
+      await ctx.reply('Nothing to cancel.').catch(() => {});
       return;
     }
 
-    const { controller, jobId, ackMessageId } = active;
-
-    // Abort the subprocess and md-speak
-    controller.abort();
-
-    // Mark job cancelled in DB
-    try {
-      db.prepare(`
-        UPDATE jobs SET status = 'cancelled', completed_at = ?, error = ? WHERE id = ? AND status = 'active'
-      `).run(Date.now(), 'cancelled by user', jobId);
-    } catch { /* DB may be closing */ }
-
-    // Edit ack message to show cancelled
-    if (ackMessageId) {
+    // 4. Handle active job abort
+    if (active) {
+      const { controller, jobId, ackMessageId } = active;
+      controller.abort();
       try {
-        await ctx.api.editMessageText(chatId, ackMessageId, 'Cancelled');
-      } catch { /* message may have been deleted */ }
+        db.prepare(
+          `UPDATE jobs SET status = 'cancelled', completed_at = ?, error = ? WHERE id = ? AND status = 'active'`
+        ).run(Date.now(), 'cancelled by user', jobId);
+      } catch { /* DB may be closing */ }
+      if (ackMessageId) {
+        try {
+          await ctx.api.editMessageText(chatId, ackMessageId, 'Cancelled');
+        } catch { /* message may have been deleted */ }
+      }
     }
 
     await ctx.reply('Cancelled.').catch(() => {});
