@@ -399,24 +399,15 @@ export function createCancelHandler(db: Database.Database) {
       `DELETE FROM pending_length_choices WHERE chat_id = ? RETURNING *`
     ).all(chatId) as PendingRow[];
 
-    // 2. Cleanup every pending row unconditionally
-    for (const pending of pendingRows) {
-      const handle = pendingTimeouts.get(pending.job_id);
-      if (handle !== undefined) {
-        clearTimeout(handle);
-        pendingTimeouts.delete(pending.job_id);
-      }
+    // 2. Abort active job immediately (sync — fires signal before any awaits)
+    if (active) {
+      const { controller, jobId } = active;
+      controller.abort();
       try {
         db.prepare(
           `UPDATE jobs SET status = 'cancelled', completed_at = ?, error = ? WHERE id = ? AND status = 'active'`
-        ).run(Date.now(), 'cancelled by user', pending.job_id);
+        ).run(Date.now(), 'cancelled by user', jobId);
       } catch { /* DB may be closing */ }
-      if (pending.keyboard_msg_id) {
-        try {
-          await ctx.api.editMessageText(chatId, pending.keyboard_msg_id, 'Cancelled');
-        } catch { /* message may have been deleted */ }
-      }
-      try { await fs.unlink(pending.source_tmpfile); } catch { /* already gone */ }
     }
 
     // 3. Nothing to cancel if no active job and no pending rows
@@ -425,15 +416,24 @@ export function createCancelHandler(db: Database.Database) {
       return;
     }
 
-    // 4. Handle active job abort
+    // 4. Cleanup every pending row (async: clearTimeout, editMessageText, fs.unlink)
+    for (const pending of pendingRows) {
+      const handle = pendingTimeouts.get(pending.job_id);
+      if (handle !== undefined) {
+        clearTimeout(handle);
+        pendingTimeouts.delete(pending.job_id);
+      }
+      if (pending.keyboard_msg_id) {
+        try {
+          await ctx.api.editMessageText(chatId, pending.keyboard_msg_id, 'Cancelled');
+        } catch { /* message may have been deleted */ }
+      }
+      try { await fs.unlink(pending.source_tmpfile); } catch { /* already gone */ }
+    }
+
+    // 5. Edit active-job ack message (async, after abort already fired)
     if (active) {
-      const { controller, jobId, ackMessageId } = active;
-      controller.abort();
-      try {
-        db.prepare(
-          `UPDATE jobs SET status = 'cancelled', completed_at = ?, error = ? WHERE id = ? AND status = 'active'`
-        ).run(Date.now(), 'cancelled by user', jobId);
-      } catch { /* DB may be closing */ }
+      const { ackMessageId } = active;
       if (ackMessageId) {
         try {
           await ctx.api.editMessageText(chatId, ackMessageId, 'Cancelled');
