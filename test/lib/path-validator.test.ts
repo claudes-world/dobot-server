@@ -23,8 +23,8 @@ const deniedEnvFile = path.join(FIXTURE_DIR, 'test.env');
 beforeAll(() => {
   // Allow the temp fixture dirs so the validator accepts these paths on any machine.
   process.env.PATH_VALIDATOR_ALLOWED_PREFIXES = [
-    FIXTURE_DIR + '/',
-    HOME_FIXTURE_DIR + '/',
+    FIXTURE_DIR + path.sep,
+    HOME_FIXTURE_DIR + path.sep,
   ].join(',');
 
   fs.mkdirSync(FIXTURE_DIR, { recursive: true });
@@ -55,12 +55,8 @@ beforeAll(() => {
 
 afterAll(() => {
   delete process.env.PATH_VALIDATOR_ALLOWED_PREFIXES;
-  for (const f of [validFile, tildeFile, oversizedFile, wrongExtInAllowed, deniedEnvFile]) {
-    try { fs.unlinkSync(f); } catch { /* ignore */ }
-  }
-  try { fs.unlinkSync(symlinkInAllowed); } catch { /* ignore */ }
-  try { fs.rmdirSync(FIXTURE_DIR); } catch { /* ignore */ }
-  try { fs.rmdirSync(HOME_FIXTURE_DIR); } catch { /* ignore */ }
+  try { fs.rmSync(FIXTURE_DIR, { recursive: true, force: true }); } catch { /* ignore */ }
+  try { fs.rmSync(HOME_FIXTURE_DIR, { recursive: true, force: true }); } catch { /* ignore */ }
 });
 
 describe('validateFilePath', () => {
