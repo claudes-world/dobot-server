@@ -79,50 +79,61 @@ export function createNarratorHandler(db: Database.Database) {
       VALUES (?, 'narrator', ?, ?, ?, 'active', 'text', 'serious', 'origin-story', NULL)
     `).run(jobId, chatId, userId, now);
 
-    // 3. Write source to temp file so continueNarration can read it after the callback
-    const sourceTmpFile = path.join(config.narrator.tmpDir, `narrator-src-${jobId}`);
-    await fs.writeFile(sourceTmpFile, sourceText);
-
-    // 4. Send inline keyboard as ack
-    const keyboard = new InlineKeyboard()
-      .text('Short (~2min)', `length:${jobId}:short`)
-      .text('Medium (default)', `length:${jobId}:medium`)
-      .text('Full length', `length:${jobId}:full`);
-
-    let ackMessageId: number | undefined;
+    // 3–6. Write temp file, send keyboard, record pending choice, arm timeout.
+    // If any step fails, mark job failed and clean up (MEDIUM-3: orphan cleanup on setup failure).
+    let sourceTmpFile: string | null = null;
     try {
-      const ackMsg = await ctx.reply('Got your text. Choose a length:', {
-        reply_parameters: { message_id: ctx.message!.message_id },
-        reply_markup: keyboard,
-      });
-      ackMessageId = ackMsg.message_id;
-    } catch (ackErr) {
-      console.warn('narrator: ack send failed (best-effort):', ackErr);
-    }
+      sourceTmpFile = path.join(config.narrator.tmpDir, `narrator-src-${jobId}`);
+      await fs.writeFile(sourceTmpFile, sourceText);
 
-    // 5. Record pending length choice — always insert so timeout can fire even if ack failed.
-    // keyboard_msg_id = 0 signals ack was not sent (no message to edit on timeout).
-    const expiresAt = Date.now() + config.narrator.lengthTimeoutMs;
-    db.prepare(`
-      INSERT INTO pending_length_choices (job_id, chat_id, keyboard_msg_id, source_tmpfile, tone_prefix, shape_prefix, expires_at)
-      VALUES (?, ?, ?, ?, NULL, NULL, ?)
-    `).run(jobId, chatId, ackMessageId ?? 0, sourceTmpFile, expiresAt);
+      // 4. Send inline keyboard as ack
+      const keyboard = new InlineKeyboard()
+        .text('Short (~2min)', `length:${jobId}:short`)
+        .text('Medium (default)', `length:${jobId}:medium`)
+        .text('Full length', `length:${jobId}:full`);
 
-    // 6. Default timeout — use medium if user doesn't tap within lengthTimeoutMs
-    const timeoutHandle = setTimeout(async () => {
-      const still = db.prepare(`SELECT * FROM pending_length_choices WHERE job_id = ?`).get(jobId);
-      if (!still) return; // already handled by callback
-      db.prepare(`DELETE FROM pending_length_choices WHERE job_id = ?`).run(jobId);
-      pendingTimeouts.delete(jobId);
-      if (ackMessageId) {
-        try {
-          await ctx.api.editMessageText(chatId, ackMessageId, 'Timed out — using default (medium)');
-        } catch { /* swallow */ }
+      let ackMessageId: number | undefined;
+      try {
+        const ackMsg = await ctx.reply('Got your text. Choose a length:', {
+          reply_parameters: { message_id: ctx.message!.message_id },
+          reply_markup: keyboard,
+        });
+        ackMessageId = ackMsg.message_id;
+      } catch (ackErr) {
+        console.warn('narrator: ack send failed (best-effort):', ackErr);
       }
-      await continueNarration(jobId, 'medium', ctx, db);
-    }, config.narrator.lengthTimeoutMs);
 
-    pendingTimeouts.set(jobId, timeoutHandle);
+      // 5. Record pending length choice — always insert so timeout can fire even if ack failed.
+      // keyboard_msg_id = 0 signals ack was not sent (no message to edit on timeout).
+      const expiresAt = Date.now() + config.narrator.lengthTimeoutMs;
+      db.prepare(`
+        INSERT INTO pending_length_choices (job_id, chat_id, keyboard_msg_id, source_tmpfile, tone_prefix, shape_prefix, expires_at)
+        VALUES (?, ?, ?, ?, NULL, NULL, ?)
+      `).run(jobId, chatId, ackMessageId ?? 0, sourceTmpFile, expiresAt);
+
+      // 6. Default timeout — use medium if user doesn't tap within lengthTimeoutMs
+      const timeoutHandle = setTimeout(async () => {
+        const still = db.prepare(`SELECT * FROM pending_length_choices WHERE job_id = ?`).get(jobId);
+        pendingTimeouts.delete(jobId); // Always clean up map entry (MEDIUM-1: prevent leak on early return)
+        if (!still) return; // already handled by callback
+        db.prepare(`DELETE FROM pending_length_choices WHERE job_id = ?`).run(jobId);
+        if (ackMessageId) {
+          try {
+            await ctx.api.editMessageText(chatId, ackMessageId, 'Timed out — using default (medium)');
+          } catch { /* swallow */ }
+        }
+        await continueNarration(jobId, 'medium', ctx, db);
+      }, config.narrator.lengthTimeoutMs);
+
+      pendingTimeouts.set(jobId, timeoutHandle);
+    } catch (setupErr) {
+      // Clean up orphaned job and temp file
+      if (sourceTmpFile) { try { await fs.unlink(sourceTmpFile); } catch { /* already gone */ } }
+      db.prepare(`UPDATE jobs SET status = 'failed', completed_at = ?, error = ? WHERE id = ?`)
+        .run(Date.now(), String(setupErr), jobId);
+      await ctx.reply('Failed to start narration. Please try again.').catch(() => {});
+      return;
+    }
   };
 }
 
