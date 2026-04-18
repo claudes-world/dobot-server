@@ -100,14 +100,13 @@ export function createNarratorHandler(db: Database.Database) {
       console.warn('narrator: ack send failed (best-effort):', ackErr);
     }
 
-    // 5. Record pending length choice
+    // 5. Record pending length choice — always insert so timeout can fire even if ack failed.
+    // keyboard_msg_id = 0 signals ack was not sent (no message to edit on timeout).
     const expiresAt = Date.now() + config.narrator.lengthTimeoutMs;
-    if (ackMessageId) {
-      db.prepare(`
-        INSERT INTO pending_length_choices (job_id, chat_id, keyboard_msg_id, source_tmpfile, tone_prefix, shape_prefix, expires_at)
-        VALUES (?, ?, ?, ?, NULL, NULL, ?)
-      `).run(jobId, chatId, ackMessageId, sourceTmpFile, expiresAt);
-    }
+    db.prepare(`
+      INSERT INTO pending_length_choices (job_id, chat_id, keyboard_msg_id, source_tmpfile, tone_prefix, shape_prefix, expires_at)
+      VALUES (?, ?, ?, ?, NULL, NULL, ?)
+    `).run(jobId, chatId, ackMessageId ?? 0, sourceTmpFile, expiresAt);
 
     // 6. Default timeout — use medium if user doesn't tap within lengthTimeoutMs
     const timeoutHandle = setTimeout(async () => {

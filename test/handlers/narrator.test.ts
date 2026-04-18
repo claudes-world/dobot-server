@@ -174,7 +174,7 @@ describe('narratorHandler — keyboard ack (message phase)', () => {
     expect(rows.length).toBe(1);
   });
 
-  it('3. Ack failure does not abort — pending row still inserted', async () => {
+  it('3. Ack failure does not abort — pending row inserted with keyboard_msg_id=0', async () => {
     const ctx = makeCtx({
       reply: vi.fn().mockRejectedValue(new Error('Telegram API down')),
     });
@@ -183,11 +183,10 @@ describe('narratorHandler — keyboard ack (message phase)', () => {
     // ack fail is best-effort — handler should not throw
     await expect(handler(ctx as never)).resolves.not.toThrow();
 
-    // When ack fails, ackMessageId is undefined, so no pending row inserted
-    // (guard: `if (ackMessageId)` wraps the insert)
-    const rows = db.prepare(`SELECT * FROM pending_length_choices`).all();
-    // No row when ackMessageId unknown — that's correct per spec
-    expect(rows.length).toBe(0);
+    // Row is still inserted (keyboard_msg_id=0) so timeout can fire continueNarration
+    const rows = db.prepare(`SELECT * FROM pending_length_choices`).all() as { keyboard_msg_id: number }[];
+    expect(rows.length).toBe(1);
+    expect(rows[0].keyboard_msg_id).toBe(0);
   });
 
   it('4. Job row inserted with NULL length', async () => {
