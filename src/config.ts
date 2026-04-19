@@ -20,8 +20,12 @@ export const config = {
     classifyModel: optional('NARRATOR_CLASSIFY_MODEL', 'claude-haiku-4-5'),
     rewriteModel: optional('NARRATOR_REWRITE_MODEL', 'claude-sonnet-4-6'),
     claudeTimeout: Number(optional('NARRATOR_CLAUDE_TIMEOUT', '600')) * 1000,
+    mdSpeakTimeout: Number(optional('NARRATOR_MDSPEAK_TIMEOUT', '600')) * 1000,
     maxSourceWords: Number(optional('NARRATOR_MAX_SOURCE_WORDS', '8000')),
     storiesDir: optional('NARRATOR_STORIES_DIR', '/home/claude/claudes-world/.world/stories'),
     tmpDir: optional('NARRATOR_TMP_DIR', '/tmp'),
+    maxJobsPerHour: Number(optional('NARRATOR_MAX_JOBS_PER_HOUR', '10')),
+    maxDailyTtsUsd: Number(optional('NARRATOR_MAX_DAILY_TTS_USD', '5.00')),
+    lengthTimeoutMs: Number(optional('NARRATOR_LENGTH_TIMEOUT', '20')) * 1000,
   },
 };
