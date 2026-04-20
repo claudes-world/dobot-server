@@ -16,7 +16,7 @@ const tildeFile = path.join(HOME_FIXTURE_DIR, 'tilde-test.md');
 const oversizedFile = path.join(FIXTURE_DIR, 'oversized-test.md');
 const symlinkInAllowed = path.join(FIXTURE_DIR, 'symlink-escape.md');
 // Wrong extension inside allowed prefix so it reaches the extension check
-const wrongExtInAllowed = path.join(FIXTURE_DIR, 'wrong-ext-test.py');
+const wrongExtInAllowed = path.join(FIXTURE_DIR, 'wrong-ext-test.csv');
 // Deny pattern: a real .env file inside the allowed prefix (matches /\.env$/)
 const deniedEnvFile = path.join(FIXTURE_DIR, 'test.env');
 

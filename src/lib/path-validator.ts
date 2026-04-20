@@ -18,7 +18,7 @@ function getAllowedPrefixes(): string[] {
   return DEFAULT_ALLOWED_PREFIXES;
 }
 const DENY_PATTERNS = [/\.secrets/, /\.ssh/, /\.gnupg/, /\.credentials\.json$/, /\.env$/];
-const ALLOWED_EXT = [".md", ".txt", ".rst", ".org"];
+const ALLOWED_EXT = [".md", ".txt", ".rst", ".org", ".js", ".ts", ".json", ".py", ".sh"];
 const MAX_SOURCE_BYTES = 500 * 1024;
 
 export function validateFilePath(userPath: string): string {
