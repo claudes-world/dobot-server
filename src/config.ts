@@ -17,6 +17,12 @@ export const config = {
   telegramNarratorBotToken: required('TELEGRAM_NARRATOR_BOT_TOKEN'),
   telegramIdeaBotToken: process.env['TELEGRAM_IDEA_BOT_TOKEN'],
   dobotDbPath: optional('DOBOT_DB_PATH', '/home/claude/.local/share/dobot-server/state.db'),
+  ideaCapture: {
+    allowedUserIds: new Set(
+      optional('IDEA_ALLOWED_USER_IDS', '').split(',').filter(Boolean).map(Number)
+    ),
+    ideaFile: optional('IDEA_FILE', '/home/claude/ideas.md'),
+  },
   narrator: {
     allowedUserIds: new Set(
       optional('NARRATOR_ALLOWED_USER_IDS', '').split(',').filter(Boolean).map(Number)
