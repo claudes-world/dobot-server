@@ -7,10 +7,7 @@ import Database from 'better-sqlite3';
 import { config } from '../config.js';
 import { buildSubprocessEnv } from '../lib/claude-subprocess.js';
 import { recordSpend } from '../lib/rate-limit.js';
-
-function toBase64url(s: string): string {
-  return Buffer.from(s).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-}
+import { toBase64url } from '../lib/telegram.js';
 
 export interface DeliveryOptions {
   jobId: string;
@@ -131,8 +128,9 @@ export async function deliverNarration(opts: DeliveryOptions): Promise<void> {
         if (!shareUrl) {
           throw new Error('publish-shared did not output a URL line');
         }
-        const urlKeyboard = new InlineKeyboard().url('Download audio', shareUrl);
-        urlKeyboard.url('Read in Pocket Console', deepLink);
+        const urlKeyboard = new InlineKeyboard()
+          .url('Download audio', shareUrl).row()
+          .url('Read in Pocket Console', deepLink);
         await ctx.reply(caption, { reply_markup: urlKeyboard });
       } catch (pubErr) {
         console.error('narrator: publish-shared failed:', pubErr);

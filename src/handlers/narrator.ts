@@ -65,6 +65,7 @@ function userFacingError(err: unknown): string {
 
 export function createNarratorHandler(db: Database.Database) {
   return async function narratorHandler(ctx: Context): Promise<void> {
+    // DM-only — silently reject group/supergroup/channel messages (#47)
     if (ctx.chat?.type !== 'private') return;
 
     const userId = ctx.from?.id;
@@ -72,9 +73,6 @@ export function createNarratorHandler(db: Database.Database) {
 
     // 1. Filter — silently reject if not in allowlist
     if (!config.narrator.allowedUserIds.has(userId)) return;
-
-    // 2. DM-only — silently reject group/supergroup/channel messages (#47)
-    if (ctx.chat?.type !== "private") return;
 
     // 1a. Forwarded message detection — check before plain text extraction
     // Note: forward_origin is the canonical forwarded-message indicator in Bot API 7.x+.
@@ -182,6 +180,7 @@ export function createNarratorHandler(db: Database.Database) {
     const wordCount = sourceText.split(/\s+/).filter(Boolean).length;
     if (wordCount > config.narrator.maxSourceWords) {
       console.log(`narrator: rejected oversized input (${wordCount} words) from user ${userId}`);
+      await ctx.reply('Your source text is too long. Please trim it to under the word limit and try again.');
       return;
     }
 

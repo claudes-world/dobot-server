@@ -36,6 +36,9 @@ async function main(): Promise<void> {
   if (ideaBotToken) {
     ideaBot = createBot(ideaBotToken);
     ideaBot.on('message', createIdeaCaptureHandler(ideaBot));
+    ideaBot.catch((err) => {
+      console.error('ideaBot: unhandled error in handler', err);
+    });
     if (config.ideaCapture.allowedUserIds.size === 0) {
       console.warn('dobot-server: IDEA_ALLOWED_USER_IDS is not set — idea bot will reject all messages');
     }

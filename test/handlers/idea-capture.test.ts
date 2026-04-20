@@ -8,6 +8,7 @@ vi.mock('../../src/config.js', () => ({
     ideaCapture: {
       allowedUserIds: new Set([1]),
       ideaFile: '/tmp/test-ideas.md',
+      photosDir: '/tmp/ideas-photos',
     },
     narrator: {
       allowedUserIds: new Set([1]),
@@ -209,8 +210,9 @@ describe('ideaCaptureHandler — photo messages', () => {
     mockFetch();
   });
 
-  it('7. Photo temp file deleted after successful save', async () => {
+  it('7. Photo saved to permanent path (no temp file)', async () => {
     const { default: fsMock } = await import('node:fs/promises');
+    const writeFileSpy = vi.mocked(fsMock.writeFile);
     const unlinkSpy = vi.mocked(fsMock.unlink);
 
     const bot = makeBot();
@@ -228,12 +230,13 @@ describe('ideaCaptureHandler — photo messages', () => {
     const handler = createIdeaCaptureHandler(bot as never);
     await handler(ctx as never);
 
-    expect(unlinkSpy).toHaveBeenCalledOnce();
-    const unlinkedPath = unlinkSpy.mock.calls[0][0] as string;
-    expect(unlinkedPath).toMatch(/idea-photo-[0-9a-f-]+\.jpg$/);
+    // Photo written directly to permanent path — no unlink
+    expect(unlinkSpy).not.toHaveBeenCalled();
+    const writtenPath = writeFileSpy.mock.calls[0][0] as string;
+    expect(writtenPath).toMatch(/\/tmp\/ideas-photos\/idea-photo-[0-9a-f-]+\.jpg$/);
   });
 
-  it('8. Photo temp file deleted even when appendFile fails', async () => {
+  it('8. Photo error reply sent when appendFile fails (no unlink)', async () => {
     const { default: fsMock } = await import('node:fs/promises');
     const appendSpy = vi.mocked(fsMock.appendFile);
     const unlinkSpy = vi.mocked(fsMock.unlink);
@@ -251,8 +254,10 @@ describe('ideaCaptureHandler — photo messages', () => {
     const handler = createIdeaCaptureHandler(bot as never);
     await handler(ctx as never);
 
-    expect(unlinkSpy).toHaveBeenCalledOnce();
-    const unlinkedPath = unlinkSpy.mock.calls[0][0] as string;
-    expect(unlinkedPath).toMatch(/idea-photo-[0-9a-f-]+\.jpg$/);
+    // No temp file to unlink — error reply sent instead
+    expect(unlinkSpy).not.toHaveBeenCalled();
+    expect(vi.mocked(ctx.reply)).toHaveBeenCalledWith(
+      expect.stringMatching(/Photo processing failed/),
+    );
   });
 });

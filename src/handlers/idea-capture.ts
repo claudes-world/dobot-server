@@ -5,10 +5,7 @@ import os from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { execa } from 'execa';
 import { config } from '../config.js';
-
-function toBase64url(s: string): string {
-  return Buffer.from(s).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-}
+import { toBase64url } from '../lib/telegram.js';
 
 /** Format the "from" field: "Display Name (@username)" or just "Display Name". */
 function formatFrom(ctx: Context): string {
@@ -43,13 +40,13 @@ function isoTimestampET(date: Date): string {
 }
 
 /** Download a Telegram file by file_id and save to destPath. */
-async function downloadTelegramFile(bot: Bot, fileId: string, destPath: string): Promise<void> {
+async function downloadTelegramFile(bot: Bot, fileId: string, destPath: string, signal?: AbortSignal): Promise<void> {
   const file = await bot.api.getFile(fileId);
   if (!file.file_path) {
     throw new Error(`Telegram returned no file_path for file_id ${fileId}`);
   }
   const url = `https://api.telegram.org/file/bot${bot.token}/${file.file_path}`;
-  const resp = await fetch(url);
+  const resp = await fetch(url, { signal });
   if (!resp.ok) {
     throw new Error(`Failed to download file: ${resp.status} ${resp.statusText}`);
   }
@@ -63,9 +60,11 @@ async function appendIdea(opts: {
   from: string;
   timestamp: string;
   body: string;
+  photoPath?: string;
 }): Promise<void> {
-  const { type, from, timestamp, body } = opts;
-  const entry = `---\n## ${type} idea — ${timestamp}\n**From:** ${from}\n\n${body}\n\n`;
+  const { type, from, timestamp, body, photoPath } = opts;
+  const photoLine = photoPath ? `![photo](${photoPath}) ` : '';
+  const entry = `---\n## ${type} idea — ${timestamp}\n**From:** ${from}\n\n${photoLine}${body}\n\n`;
   await fs.appendFile(config.ideaCapture.ideaFile, entry, 'utf8');
 }
 
@@ -114,7 +113,13 @@ export function createIdeaCaptureHandler(bot: Bot) {
     if (voice) {
       const tempPath = path.join(os.tmpdir(), `idea-voice-${randomUUID()}.oga`);
       try {
-        await downloadTelegramFile(bot, voice.file_id, tempPath);
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 30_000);
+        try {
+          await downloadTelegramFile(bot, voice.file_id, tempPath, controller.signal);
+        } finally {
+          clearTimeout(timer);
+        }
 
         const result = await execa('/home/claude/bin/transcribe', [tempPath], {
           timeout: 60000,
@@ -143,19 +148,25 @@ export function createIdeaCaptureHandler(bot: Bot) {
     if (photos && photos.length > 0) {
       // Telegram sends photos sorted by size — take the largest
       const largest = photos[photos.length - 1];
-      const tempPath = path.join(os.tmpdir(), `idea-photo-${randomUUID()}.jpg`);
+      const permanentPath = path.join(config.ideaCapture.photosDir, `idea-photo-${randomUUID()}.jpg`);
       try {
-        await downloadTelegramFile(bot, largest.file_id, tempPath);
+        await fs.mkdir(config.ideaCapture.photosDir, { recursive: true });
 
-        const caption = ctx.message?.caption ?? '[photo]';
-        await appendIdea({ type: 'photo', from, timestamp, body: caption });
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 30_000);
+        try {
+          await downloadTelegramFile(bot, largest.file_id, permanentPath, controller.signal);
+        } finally {
+          clearTimeout(timer);
+        }
+
+        const caption = ctx.message?.caption ?? '';
+        await appendIdea({ type: 'photo', from, timestamp, body: caption, photoPath: permanentPath });
         await ctx.reply('✅ Idea saved', { reply_markup: keyboard });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         console.error('[idea-capture/photo] Error:', msg);
         await ctx.reply(`Photo processing failed: ${msg}`).catch(() => {});
-      } finally {
-        try { await fs.unlink(tempPath); } catch { /* may not exist */ }
       }
       return;
     }
