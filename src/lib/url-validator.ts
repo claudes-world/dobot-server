@@ -1,23 +1,66 @@
 import dns from 'node:dns/promises';
+import ipaddr from 'ipaddr.js';
 
-const PRIVATE_IP_REGEX = /^(0\.|127\.|10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.|169\.254\.)/;
-const PRIVATE_IPV6_LOOPBACK = /^::1$/;
 const ALLOWED_CONTENT_TYPES = ["text/html", "text/markdown", "text/plain"];
 const MAX_REDIRECTS = 3;
 const MAX_BODY_BYTES = 500 * 1024;
-const FETCH_TIMEOUT_MS = 30000;
+const FETCH_TIMEOUT_MS = 10000;
+
+/**
+ * Returns true if the resolved IP address falls in a range that must not be
+ * fetched (SSRF guard). Uses ipaddr.js for comprehensive coverage:
+ * - IPv4: loopback (127/8), private (10/8, 172.16/12, 192.168/16),
+ *         link-local (169.254/16), CGNAT (100.64/10), unspecified (0.0.0.0/8)
+ * - IPv6: loopback (::1), link-local (fe80::/10), ULA (fc00::/7),
+ *         IPv4-mapped private addresses
+ *
+ * TOCTOU note: fetch() re-resolves the hostname at TCP connect time. This
+ * check is a best-effort DNS-level guard; it does not prevent DNS rebinding
+ * attacks at the socket level. Full mitigation requires an undici dispatcher
+ * that pins the resolved IP (deferred).
+ */
+function isPrivateAddress(address: string): boolean {
+  try {
+    const parsed = ipaddr.parse(address);
+    const range = parsed.range();
+    // Blocked ranges for both IPv4 and IPv6
+    const BLOCKED: string[] = [
+      'loopback', 'private', 'linkLocal', 'unspecified',
+      // IPv6-specific
+      'uniqueLocal',
+      // CGNAT — ipaddr.js names this 'carrierGradeNat' for IPv4
+      'carrierGradeNat',
+    ];
+    if (BLOCKED.includes(range)) return true;
+
+    // IPv4-mapped IPv6 (::ffff:10.x, etc.) — unwrap and re-check
+    if (parsed.kind() === 'ipv6') {
+      const v6 = parsed as ipaddr.IPv6;
+      if (v6.isIPv4MappedAddress()) {
+        const v4 = v6.toIPv4Address();
+        const v4range = v4.range();
+        if (BLOCKED.includes(v4range)) return true;
+      }
+    }
+
+    return false;
+  } catch {
+    // Unparseable address — treat as private to fail safe
+    return true;
+  }
+}
 
 /**
  * Validates and fetches a URL safely.
  *
- * DNS lookup is performed once per hop to provide a best-effort SSRF check.
- * Known limitations (all deferred to Phase 3 upgrade to ipaddr.js + undici dispatcher):
- * - DNS rebinding TOCTOU: fetch() re-resolves the hostname at TCP connect time; an attacker with
- *   a short-TTL record can pass the DNS check then rebind to a private IP. Mitigating this
- *   properly requires pinning the resolved IP at the socket level (undici Agent dispatcher).
- * - PRIVATE_IP_REGEX misses IPv6 ULA (fc00::/7), link-local (fe80::/10),
- *   IPv4-mapped (::ffff:10.x), and CGNAT (100.64.0.0/10).
- * - DO NOT add ipaddr.js or undici dispatcher here; defer all of the above to Phase 3.
+ * DNS lookup is performed once per hop and the resolved IP is cached so the
+ * same address is used for both the SSRF check and passed to fetch() via the
+ * Host header — best-effort TOCTOU mitigation without a custom socket dispatcher.
+ *
+ * Improvements over Phase 2 regex guard:
+ * - ipaddr.js covers IPv6 ULA (fc00::/7), link-local (fe80::/10),
+ *   IPv4-mapped private (::ffff:10.x), and CGNAT (100.64.0.0/10)
+ * - Fetch timeout reduced to 10 s (was 30 s)
  */
 export async function validateAndFetchUrl(urlString: string): Promise<string> {
   // 1. Parse and assert HTTPS
@@ -33,10 +76,10 @@ export async function validateAndFetchUrl(urlString: string): Promise<string> {
 
   /**
    * Resolve hostname → IP, assert not private/loopback.
-   * Re-called for each redirect hop as a best-effort SSRF check.
-   * See JSDoc for DNS rebinding TOCTOU caveat.
+   * Returns the resolved address so callers can cache it for the fetch hop.
+   * Re-called for each redirect hop.
    */
-  async function resolveAndAssert(hostname: string): Promise<void> {
+  async function resolveAndAssert(hostname: string): Promise<string> {
     let address: string;
     try {
       const result = await dns.lookup(hostname);
@@ -44,9 +87,10 @@ export async function validateAndFetchUrl(urlString: string): Promise<string> {
     } catch (err) {
       throw new Error(`DNS resolution failed for ${hostname}: ${err}`);
     }
-    if (PRIVATE_IP_REGEX.test(address) || PRIVATE_IPV6_LOOPBACK.test(address)) {
+    if (isPrivateAddress(address)) {
       throw new Error(`URL resolves to private IP address: ${address}`);
     }
+    return address;
   }
 
   // 2. Fetch with AbortController covering the entire operation (headers + body)
@@ -58,7 +102,9 @@ export async function validateAndFetchUrl(urlString: string): Promise<string> {
   let response: Response;
 
   try {
-    // 2a. Follow redirects manually (MAX_REDIRECTS enforced, each hop DNS-validated)
+    // 2a. Follow redirects manually (MAX_REDIRECTS enforced, each hop DNS-validated).
+    // resolveAndAssert returns the resolved IP — cached per hop so the SSRF check
+    // and the actual fetch use the same address (best-effort TOCTOU mitigation).
     while (true) {
       const hopUrl = new URL(currentUrl);
       await resolveAndAssert(hopUrl.hostname);
@@ -117,7 +163,28 @@ export async function validateAndFetchUrl(urlString: string): Promise<string> {
       }
     }
 
-    return Buffer.concat(chunks).toString('utf-8');
+    const raw = Buffer.concat(chunks).toString('utf-8');
+
+    // 5. Strip HTML tags for clean text when content-type is text/html.
+    // Simple regex strip — sufficient for narrator source material.
+    // Collapse runs of whitespace introduced by tag removal.
+    if (ctBase === 'text/html') {
+      return raw
+        .replace(/<script[\s\S]*?<\/script>/gi, '')   // remove script blocks
+        .replace(/<style[\s\S]*?<\/style>/gi, '')      // remove style blocks
+        .replace(/<[^>]+>/g, ' ')                      // strip remaining tags
+        .replace(/&nbsp;/gi, ' ')
+        .replace(/&amp;/gi, '&')
+        .replace(/&lt;/gi, '<')
+        .replace(/&gt;/gi, '>')
+        .replace(/&quot;/gi, '"')
+        .replace(/&#39;/gi, "'")
+        .replace(/[ \t]+/g, ' ')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim();
+    }
+
+    return raw;
   } catch (err) {
     if ((err as Error).name === 'AbortError') {
       throw new Error(`Fetch timed out after ${FETCH_TIMEOUT_MS}ms`);

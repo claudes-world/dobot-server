@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { detectFilePath } from '../../src/lib/detect-input.js';
+import { detectFilePath, detectUrl } from '../../src/lib/detect-input.js';
 
 describe('detectFilePath', () => {
   it('1. absolute path alone — returns path', () => {
@@ -44,5 +44,48 @@ describe('detectFilePath', () => {
 
   it('11. tilde without slash — returns null', () => {
     expect(detectFilePath('~notes.md')).toBeNull();
+  });
+});
+
+describe('detectUrl', () => {
+  it('1. bare HTTPS URL — returns URL', () => {
+    expect(detectUrl('https://example.com/article')).toBe('https://example.com/article');
+  });
+
+  it('2. URL with prefix text — returns URL', () => {
+    expect(detectUrl('[funny] https://example.com/page')).toBe('https://example.com/page');
+  });
+
+  it('3. URL with trailing period — strips period', () => {
+    expect(detectUrl('Check out https://example.com/story.')).toBe('https://example.com/story');
+  });
+
+  it('4. URL with trailing comma — strips comma', () => {
+    expect(detectUrl('See https://example.com/article, thanks')).toBe('https://example.com/article');
+  });
+
+  it('5. HTTP URL — returns null (only HTTPS accepted)', () => {
+    expect(detectUrl('http://example.com/article')).toBeNull();
+  });
+
+  it('6. plain prose — returns null', () => {
+    expect(detectUrl('Once upon a time in a land far away')).toBeNull();
+  });
+
+  it('7. empty string — returns null', () => {
+    expect(detectUrl('')).toBeNull();
+  });
+
+  it('8. URL with query params — returns full URL', () => {
+    const url = 'https://example.com/search?q=foo&page=2';
+    expect(detectUrl(url)).toBe(url);
+  });
+
+  it('9. URL with fragment — returns URL including fragment', () => {
+    expect(detectUrl('https://example.com/article#section')).toBe('https://example.com/article#section');
+  });
+
+  it('10. URL with port — returns full URL', () => {
+    expect(detectUrl('https://example.com:8443/path')).toBe('https://example.com:8443/path');
   });
 });

@@ -10,8 +10,9 @@ import { buildSubprocessEnv, spawnClaudeWithRetry, ClaudeEnvelope } from '../lib
 import { checkAndRecordRate } from '../lib/rate-limit.js';
 import { parsePrefix } from '../lib/parse-prefix.js';
 import { classifyNarrative } from '../lib/classify.js';
-import { detectFilePath } from '../lib/detect-input.js';
+import { detectFilePath, detectUrl } from '../lib/detect-input.js';
 import { validateFilePath } from '../lib/path-validator.js';
+import { validateAndFetchUrl } from '../lib/url-validator.js';
 
 function narratorSkillPath(...parts: string[]): string {
   return path.join(config.narrator.narratorRoot, ...parts);
@@ -127,6 +128,22 @@ export function createNarratorHandler(db: Database.Database) {
       } catch (err) {
         await ctx.reply(`Failed to read file: ${String(err)}`);
         return;
+      }
+    } else {
+      // URL detection — if stripped text contains an HTTPS URL, fetch it as the source.
+      const detectedUrl = detectUrl(sourceText.trim());
+      if (detectedUrl !== null) {
+        try {
+          sourceText = await validateAndFetchUrl(detectedUrl);
+        } catch (err) {
+          const msg = String(err);
+          if (/private IP/i.test(msg) || /SSRF/i.test(msg)) {
+            await ctx.reply('Cannot fetch that URL: it resolves to a private or reserved address.');
+          } else {
+            await ctx.reply(`Failed to fetch URL: ${msg}`);
+          }
+          return;
+        }
       }
     }
 
