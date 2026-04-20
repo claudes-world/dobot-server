@@ -1,4 +1,5 @@
 import path from 'node:path';
+import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -17,6 +18,13 @@ export const config = {
   telegramNarratorBotToken: required('TELEGRAM_NARRATOR_BOT_TOKEN'),
   telegramIdeaBotToken: process.env['TELEGRAM_IDEA_BOT_TOKEN'],
   dobotDbPath: optional('DOBOT_DB_PATH', '/home/claude/.local/share/dobot-server/state.db'),
+  ideaCapture: {
+    allowedUserIds: new Set(
+      optional('IDEA_ALLOWED_USER_IDS', '').split(',').filter(Boolean).map(Number)
+    ),
+    ideaFile: optional('IDEA_FILE', '/home/claude/ideas.md'),
+    photosDir: path.resolve(process.env['IDEA_PHOTOS_DIR'] ?? path.join(os.homedir(), 'ideas-photos')),
+  },
   narrator: {
     allowedUserIds: new Set(
       optional('NARRATOR_ALLOWED_USER_IDS', '').split(',').filter(Boolean).map(Number)
