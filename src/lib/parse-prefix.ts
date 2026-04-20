@@ -25,11 +25,11 @@ export function parsePrefix(raw: string): ParsePrefixReturn {
   const shapeRaw = match[2]?.toLowerCase() ?? null;
   const text = raw.slice(match[0].length);
 
-  if (!VALID_TONES.includes(toneRaw)) {
+  if (!(VALID_TONES as readonly string[]).includes(toneRaw)) {
     return { error: `Unknown tone '${toneRaw}'. Valid tones: ${VALID_TONES.join(', ')}` };
   }
 
-  if (shapeRaw !== null && !VALID_SHAPES.includes(shapeRaw)) {
+  if (shapeRaw !== null && !(VALID_SHAPES as readonly string[]).includes(shapeRaw)) {
     return { error: `Unknown shape '${shapeRaw}'. Valid shapes: ${VALID_SHAPES.join(', ')}` };
   }
 

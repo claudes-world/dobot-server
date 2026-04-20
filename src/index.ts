@@ -22,8 +22,8 @@ async function main(): Promise<void> {
 
   registerHandlers(narratorBot, {
     narrator: createNarratorHandler(db),
-    narratorCallback: createLengthCallbackHandler(db, (jobId, length, ctx, toneOverride, shapeOverride, _ackMessageId) =>
-      continueNarration(jobId, length, ctx, db, toneOverride, shapeOverride)
+    narratorCallback: createLengthCallbackHandler(db, (jobId, length, ctx, toneOverride, shapeOverride, ackMessageId) =>
+      continueNarration(jobId, length, ctx, db, toneOverride, shapeOverride, ackMessageId)
     ),
     cancel: createCancelHandler(db),
   });

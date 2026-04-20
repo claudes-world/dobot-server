@@ -104,8 +104,15 @@ ${excerpt}`;
   // Parse the inner JSON result from Claude's response
   let inner: Record<string, unknown>;
   try {
-    // Claude may wrap the JSON in markdown code fences — strip them
-    const cleaned = resultStr.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
+    // Claude may emit preamble text and/or markdown code fences before the JSON object.
+    // Strip leading/trailing fences, then extract the substring from first '{' to last '}'.
+    const fenceStripped = resultStr.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
+    const start = fenceStripped.indexOf('{');
+    const end = fenceStripped.lastIndexOf('}');
+    if (start === -1 || end === -1 || end < start) {
+      throw new SyntaxError('no JSON object found in result');
+    }
+    const cleaned = fenceStripped.slice(start, end + 1);
     inner = JSON.parse(cleaned) as Record<string, unknown>;
   } catch {
     console.warn('classify: failed to parse envelope.result as JSON, returning defaults. result snippet:', resultStr.slice(0, 200));

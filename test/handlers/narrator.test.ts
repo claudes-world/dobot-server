@@ -8,6 +8,7 @@ vi.mock('../../src/config.js', () => ({
     narrator: {
       allowedUserIds: new Set([1]),
       agentRunScript: '/fake/run.sh',
+      narratorRoot: '/fake/claudes-world/agents/narrator',
       classifyModel: 'claude-haiku-4-5',
       rewriteModel: 'claude-sonnet-4-6',
       claudeTimeout: 30000,
@@ -319,18 +320,13 @@ describe('continueNarration — spawn + delivery phase', () => {
     expect(classifyNarrative).toHaveBeenCalled();
   });
 
-  it('7. classifyNarrative NOT called when tone_prefix stored', async () => {
+  it('7. classifyNarrative NOT called when toneOverride passed directly', async () => {
     const jobId = 'job-prefix-override';
     insertJob(db, jobId);
 
-    // Insert pending row with tone/shape prefix stored
-    db.prepare(`
-      INSERT INTO pending_length_choices (job_id, chat_id, keyboard_msg_id, source_tmpfile, tone_prefix, shape_prefix, expires_at)
-      VALUES (?, 100, 0, '/tmp/fake-src', 'funny', 'heist-reveal', ?)
-    `).run(jobId, Date.now() + 60000);
-
     const ctx = makeCtx();
-    await continueNarration(jobId, 'medium', ctx as never, db);
+    // toneOverride/shapeOverride passed directly (callback/timeout path — no DB read)
+    await continueNarration(jobId, 'medium', ctx as never, db, 'funny', 'heist-reveal');
 
     expect(classifyNarrative).not.toHaveBeenCalled();
   });
@@ -358,13 +354,9 @@ describe('continueNarration — spawn + delivery phase', () => {
     const jobId = 'job-deliver-prefix-args';
     insertJob(db, jobId);
 
-    db.prepare(`
-      INSERT INTO pending_length_choices (job_id, chat_id, keyboard_msg_id, source_tmpfile, tone_prefix, shape_prefix, expires_at)
-      VALUES (?, 100, 0, '/tmp/fake-src', 'roast', 'detective', ?)
-    `).run(jobId, Date.now() + 60000);
-
     const ctx = makeCtx();
-    await continueNarration(jobId, 'medium', ctx as never, db);
+    // toneOverride/shapeOverride passed directly (callback/timeout path — no DB read)
+    await continueNarration(jobId, 'medium', ctx as never, db, 'roast', 'detective');
 
     expect(deliverNarration).toHaveBeenCalledWith(
       expect.objectContaining({ tone: 'roast', shape: 'detective' })
