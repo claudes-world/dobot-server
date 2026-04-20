@@ -101,8 +101,8 @@ describe('narratorCallbackHandler', () => {
     // Answer callback
     expect(ctx.answerCallbackQuery).toHaveBeenCalled();
 
-    // onLengthChosen invoked with correct args
-    expect(onLengthChosen).toHaveBeenCalledWith(jobId, 'medium', ctx);
+    // onLengthChosen invoked with correct args (tone/shape prefix are null — not set in insertPending)
+    expect(onLengthChosen).toHaveBeenCalledWith(jobId, 'medium', ctx, null, null, 99);
   });
 
   it('2. Expired/missing callback_data (no "length:" prefix) — answers callback, no crash', async () => {
@@ -178,8 +178,8 @@ describe('narratorCallbackHandler', () => {
     expect(other1).toBeUndefined();
     expect(other2).toBeUndefined();
 
-    // onLengthChosen still called for main job
-    expect(onLengthChosen).toHaveBeenCalledWith(jobId, 'full', ctx);
+    // onLengthChosen still called for main job (tone/shape prefix null — not set in insertPending)
+    expect(onLengthChosen).toHaveBeenCalledWith(jobId, 'full', ctx, null, null, 99);
   });
 
   it('5. Invalid length value — answers callback with error, no crash, onLengthChosen not called', async () => {
