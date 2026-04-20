@@ -8,14 +8,22 @@ import { getTracer, withSpan } from '../lib/otel.js';
 import { deliverNarration } from '../delivery/narrator.js';
 import { buildSubprocessEnv, spawnClaudeWithRetry, ClaudeEnvelope } from '../lib/claude-subprocess.js';
 import { checkAndRecordRate } from '../lib/rate-limit.js';
+import { parsePrefix } from '../lib/parse-prefix.js';
+import { classifyNarrative } from '../lib/classify.js';
+
+function narratorSkillPath(...parts: string[]): string {
+  return path.join(config.narrator.narratorRoot, ...parts);
+}
 
 const SYSTEM_PROMPT_PARTS = [
-  '/home/claude/claudes-world/agents/narrator/.claude/output-styles/narrator.md',
-  '/home/claude/claudes-world/agents/narrator/narrative-writing-guide.md',
+  narratorSkillPath('.claude', 'output-styles', 'narrator.md'),
+  narratorSkillPath('narrative-writing-guide.md'),
 ];
 
-const BASE_USER_PROMPT = `Rewrite the source provided via stdin as a serious origin-story narrative suitable for text-to-speech playback.
+function buildUserPrompt(tone: string, shape: string): string {
+  return `Rewrite the source provided via stdin as a ${tone} ${shape} narrative suitable for text-to-speech playback.
 Respond ONLY with the narrative prose — do not write files, do not include preamble, do not add commentary at the end.`;
+}
 
 const LENGTH_INSTRUCTIONS: Record<'short' | 'medium' | 'full', string> = {
   short: 'Target length: short (approximately 200-400 words of output).',
@@ -65,8 +73,26 @@ export function createNarratorHandler(db: Database.Database) {
     // 2. DM-only — silently reject group/supergroup/channel messages (#47)
     if (ctx.chat?.type !== "private") return;
 
-    const sourceText = ctx.message?.text;
-    if (!sourceText) return;
+    const rawText = ctx.message?.text;
+    if (!rawText) return;
+
+    // 1a. Parse prefix — validate tone/shape override before anything else
+    const prefixResult = parsePrefix(rawText);
+    if ('error' in prefixResult) {
+      await ctx.reply(prefixResult.error);
+      return;
+    }
+
+    // prefixResult.text is the stripped text (prefix removed if found)
+    const sourceText = prefixResult.text;
+    const tonePrefix = prefixResult.prefixFound ? prefixResult.tone : null;
+    const shapePrefix = prefixResult.prefixFound ? prefixResult.shape : null;
+
+    // Empty-body guard — reject prefix-only input (e.g. "[funny]" with no text)
+    if (!sourceText.trim()) {
+      await ctx.reply('Please include some text after the prefix. Example: [funny] Your text here…');
+      return;
+    }
 
     // Word-count guard — reject oversized input before spawning subprocess
     const wordCount = sourceText.split(/\s+/).filter(Boolean).length;
@@ -91,7 +117,7 @@ export function createNarratorHandler(db: Database.Database) {
     // 2. Insert jobs row — length NULL until user chooses (or timeout defaults to medium)
     db.prepare(`
       INSERT INTO jobs (id, handler, chat_id, user_id, started_at, status, source_kind, tone, shape, length)
-      VALUES (?, 'narrator', ?, ?, ?, 'active', 'text', 'serious', 'origin-story', NULL)
+      VALUES (?, 'narrator', ?, ?, ?, 'active', 'text', NULL, NULL, NULL)
     `).run(jobId, chatId, userId, now);
 
     // 3–6. Write temp file, send keyboard, record pending choice, arm timeout.
@@ -120,17 +146,19 @@ export function createNarratorHandler(db: Database.Database) {
 
       // 5. Record pending length choice — always insert so timeout can fire even if ack failed.
       // keyboard_msg_id = 0 signals ack was not sent (no message to edit on timeout).
+      // tone_prefix/shape_prefix non-null only when user provided a [tone:shape] prefix override.
       const expiresAt = Date.now() + config.narrator.lengthTimeoutMs;
       db.prepare(`
         INSERT INTO pending_length_choices (job_id, chat_id, keyboard_msg_id, source_tmpfile, tone_prefix, shape_prefix, expires_at)
-        VALUES (?, ?, ?, ?, NULL, NULL, ?)
-      `).run(jobId, chatId, ackMessageId ?? 0, sourceTmpFile, expiresAt);
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run(jobId, chatId, ackMessageId ?? 0, sourceTmpFile, tonePrefix, shapePrefix, expiresAt);
 
       // 6. Default timeout — use medium if user doesn't tap within lengthTimeoutMs
       const timeoutHandle = setTimeout(async () => {
         try {
           // Atomically consume — avoids SELECT+DELETE race with callback path
-          const still = db.prepare(`DELETE FROM pending_length_choices WHERE job_id = ? RETURNING *`).get(jobId);
+          const still = db.prepare(`DELETE FROM pending_length_choices WHERE job_id = ? RETURNING *`).get(jobId) as
+            | { tone_prefix: string | null; shape_prefix: string | null } | undefined;
           pendingTimeouts.delete(jobId); // Always clean up map entry (MEDIUM-1: prevent leak on early return)
           if (!still) return; // already handled by callback
           if (ackMessageId) {
@@ -138,7 +166,7 @@ export function createNarratorHandler(db: Database.Database) {
               await ctx.api.editMessageText(chatId, ackMessageId, 'Timed out — using default (medium)');
             } catch { /* swallow */ }
           }
-          await continueNarration(jobId, 'medium', ctx, db);
+          await continueNarration(jobId, 'medium', ctx, db, still.tone_prefix, still.shape_prefix, ackMessageId);
         } catch (err) {
           console.error(`narrator: unhandled error in timeout for job ${jobId}:`, err);
         }
@@ -165,6 +193,9 @@ export async function continueNarration(
   length: 'short' | 'medium' | 'full',
   ctx: Context,
   db: Database.Database,
+  toneOverride?: string | null,
+  shapeOverride?: string | null,
+  ackMessageId?: number,
 ): Promise<void> {
   // Clear any pending timeout for this job (if called from callback)
   const existingTimeout = pendingTimeouts.get(jobId);
@@ -198,13 +229,9 @@ export async function continueNarration(
     return;
   }
 
-  // Find the ack message id to update user on progress
-  const pendingRow = db.prepare(`SELECT keyboard_msg_id FROM pending_length_choices WHERE job_id = ?`).get(jobId) as
-    | { keyboard_msg_id: number }
-    | undefined;
-  // Note: pending row may already be deleted by the callback handler — that's fine
-  // We get ackMessageId from the callback-edited message (already shows "Rewriting in X mode…")
-  // We need it only if we need to edit again on error. The callback handler already edited it.
+  // Note: pending_length_choices row is already deleted by the time we run here (callback path deletes it
+  // atomically before calling continueNarration; timeout path deletes with RETURNING and passes result inline).
+  // Tone/shape overrides are passed in directly via toneOverride/shapeOverride to avoid the race.
 
   // Typing indicator — record_voice shows "recording voice message..."
   let typingInterval: ReturnType<typeof setInterval> | undefined;
@@ -222,19 +249,49 @@ export async function continueNarration(
 
   let sysTmpFile: string | null = null;
 
-  // We need ackMessageId for error editing — look it up from pendingRow or skip
-  const ackMessageId = pendingRow?.keyboard_msg_id;
-
   // Register active job — /cancel reads this map
   activeJobs.set(chatId, { controller, jobId, ackMessageId });
 
   try {
-    // Build system prompt file
-    sysTmpFile = path.join(config.narrator.tmpDir, `narrator-sys-${jobId}.md`);
-    const parts = await Promise.all(SYSTEM_PROMPT_PARTS.map(p => fs.readFile(p, 'utf8')));
-    await fs.writeFile(sysTmpFile, parts.join('\n\n---\n\n'));
+    // Resolve tone + shape:
+    // toneOverride/shapeOverride are passed in directly (avoids pending_length_choices race).
+    // If no override, classify the source text.
+    let tone: string;
+    let shape: string;
+    if (toneOverride) {
+      tone = toneOverride;
+      shape = shapeOverride ?? 'origin-story';
+      console.log(`narrator: job ${jobId} using prefix override — tone=${tone}, shape=${shape}`);
+    } else {
+      const classified = await classifyNarrative(sourceText, controller.signal);
+      tone = classified.tone;
+      shape = classified.shape;
+      console.log(`narrator: job ${jobId} classified — tone=${tone}, shape=${shape}, confidence=${classified.confidence}, source=${classified.source}`);
+    }
 
-    const userPrompt = `${BASE_USER_PROMPT}\n${LENGTH_INSTRUCTIONS[length]}`;
+    // Persist resolved tone/shape to jobs row so analytics/debugging sees actual values used
+    db.prepare(`UPDATE jobs SET tone = ?, shape = ? WHERE id = ?`).run(tone, shape, jobId);
+
+    // Build system prompt file — base persona + tone skill + shape skill
+    sysTmpFile = path.join(config.narrator.tmpDir, `narrator-sys-${jobId}.md`);
+    const toneSkillPath = narratorSkillPath('.claude', 'skills', `tone-${tone}`, 'SKILL.md');
+    const shapeSkillPath = narratorSkillPath('.claude', 'skills', `shape-${shape}`, 'SKILL.md');
+
+    const systemParts = [...SYSTEM_PROMPT_PARTS];
+    // Only append skill files that exist — missing skills are non-fatal (graceful degradation)
+    for (const skillPath of [toneSkillPath, shapeSkillPath]) {
+      try {
+        await fs.access(skillPath);
+        systemParts.push(skillPath);
+      } catch {
+        console.warn(`narrator: skill file not found (skipping): ${skillPath}`);
+      }
+    }
+
+    const partContents = await Promise.all(systemParts.map(p => fs.readFile(p, 'utf8')));
+    await fs.writeFile(sysTmpFile, partContents.join('\n\n---\n\n'));
+
+    const userPrompt = `${buildUserPrompt(tone, shape)}\n${LENGTH_INSTRUCTIONS[length]}`;
 
     // Spawn narrator subprocess — wrapped in OTEL span
     const result = await withSpan(tracer, 'rewrite.sonnet', {
@@ -305,6 +362,8 @@ export async function continueNarration(
       userId,
       narrative,
       stopReason,
+      tone,
+      shape,
       ctx,
       db,
       ackMessageId,

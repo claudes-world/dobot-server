@@ -19,7 +19,7 @@ interface PendingChoice {
  */
 export function createLengthCallbackHandler(
   db: Database.Database,
-  onLengthChosen: (jobId: string, length: 'short' | 'medium' | 'full', ctx: Context) => Promise<void>
+  onLengthChosen: (jobId: string, length: 'short' | 'medium' | 'full', ctx: Context, toneOverride: string | null, shapeOverride: string | null, ackMessageId: number | undefined) => Promise<void>
 ) {
   return async function lengthCallbackHandler(ctx: Context): Promise<void> {
     const data = ctx.callbackQuery?.data;
@@ -105,7 +105,8 @@ export function createLengthCallbackHandler(
       console.warn('narrator: answerCallbackQuery failed (non-fatal):', err);
     }
 
-    // Invoke the continuation (will spawn Claude rewrite)
-    await onLengthChosen(jobId, length, ctx);
+    // Invoke the continuation — pass tone/shape overrides directly so continueNarration
+    // doesn't need to re-read the pending row (which is already deleted above).
+    await onLengthChosen(jobId, length, ctx, pending.tone_prefix, pending.shape_prefix, pending.keyboard_msg_id);
   };
 }

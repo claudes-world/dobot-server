@@ -8,6 +8,7 @@ vi.mock('../../src/config.js', () => ({
     narrator: {
       allowedUserIds: new Set([1]),
       agentRunScript: '/fake/run.sh',
+      narratorRoot: '/fake/claudes-world/agents/narrator',
       classifyModel: 'claude-haiku-4-5',
       rewriteModel: 'claude-sonnet-4-6',
       claudeTimeout: 30000,
@@ -49,14 +50,28 @@ vi.mock('node:fs/promises', () => ({
     readFile: vi.fn().mockResolvedValue('mock source text'),
     writeFile: vi.fn().mockResolvedValue(undefined),
     unlink: vi.fn().mockResolvedValue(undefined),
+    access: vi.fn().mockRejectedValue(new Error('not found')), // skill files don't exist by default
   },
   readFile: vi.fn().mockResolvedValue('mock source text'),
   writeFile: vi.fn().mockResolvedValue(undefined),
   unlink: vi.fn().mockResolvedValue(undefined),
+  access: vi.fn().mockRejectedValue(new Error('not found')),
+}));
+
+vi.mock('../../src/lib/classify.js', () => ({
+  classifyNarrative: vi.fn().mockResolvedValue({
+    tone: 'serious',
+    shape: 'origin-story',
+    confidence: 0.9,
+    source: 'classify',
+  }),
+  VALID_TONES: ['serious', 'funny', 'roast', 'grave', 'celebratory', 'comforting', 'harsh', 'inflammatory', 'surprising', 'jovial'],
+  VALID_SHAPES: ['origin-story', 'postmortem', 'heist-reveal', 'detective', 'hero-journey', 'confessional'],
 }));
 
 import { spawnClaudeWithRetry } from '../../src/lib/claude-subprocess.js';
 import { deliverNarration } from '../../src/delivery/narrator.js';
+import { classifyNarrative } from '../../src/lib/classify.js';
 import { createNarratorHandler, continueNarration } from '../../src/handlers/narrator.js';
 
 function createTestDb(): Database.Database {
@@ -293,5 +308,108 @@ describe('continueNarration — spawn + delivery phase', () => {
 
     const job = db.prepare(`SELECT length FROM jobs WHERE id = ?`).get(jobId) as { length: string };
     expect(job.length).toBe('full');
+  });
+
+  it('6. classifyNarrative called when no prefix override', async () => {
+    const jobId = 'job-classify-called';
+    insertJob(db, jobId);
+
+    const ctx = makeCtx();
+    await continueNarration(jobId, 'medium', ctx as never, db);
+
+    expect(classifyNarrative).toHaveBeenCalled();
+  });
+
+  it('7. classifyNarrative NOT called when toneOverride passed directly', async () => {
+    const jobId = 'job-prefix-override';
+    insertJob(db, jobId);
+
+    const ctx = makeCtx();
+    // toneOverride/shapeOverride passed directly (callback/timeout path — no DB read)
+    await continueNarration(jobId, 'medium', ctx as never, db, 'funny', 'heist-reveal');
+
+    expect(classifyNarrative).not.toHaveBeenCalled();
+  });
+
+  it('8. deliverNarration called with tone and shape from classify', async () => {
+    vi.mocked(classifyNarrative).mockResolvedValueOnce({
+      tone: 'grave',
+      shape: 'postmortem',
+      confidence: 0.8,
+      source: 'classify',
+    });
+
+    const jobId = 'job-deliver-classify-args';
+    insertJob(db, jobId);
+
+    const ctx = makeCtx();
+    await continueNarration(jobId, 'medium', ctx as never, db);
+
+    expect(deliverNarration).toHaveBeenCalledWith(
+      expect.objectContaining({ tone: 'grave', shape: 'postmortem' })
+    );
+  });
+
+  it('9. deliverNarration called with tone and shape from prefix override', async () => {
+    const jobId = 'job-deliver-prefix-args';
+    insertJob(db, jobId);
+
+    const ctx = makeCtx();
+    // toneOverride/shapeOverride passed directly (callback/timeout path — no DB read)
+    await continueNarration(jobId, 'medium', ctx as never, db, 'roast', 'detective');
+
+    expect(deliverNarration).toHaveBeenCalledWith(
+      expect.objectContaining({ tone: 'roast', shape: 'detective' })
+    );
+  });
+});
+
+describe('narratorHandler — prefix parsing (message phase)', () => {
+  let db: Database.Database;
+
+  beforeEach(() => {
+    db = createTestDb();
+    vi.clearAllMocks();
+    vi.mocked(spawnClaudeWithRetry).mockResolvedValue(mockSuccessEnvelope);
+    vi.mocked(deliverNarration).mockResolvedValue(undefined);
+  });
+
+  it('10. Invalid tone prefix replies with error and returns early', async () => {
+    const ctx = makeCtx({ message: { text: '[badtone] Some text', message_id: 42 } });
+    const handler = createNarratorHandler(db);
+    await handler(ctx as never);
+
+    // Should reply with error mentioning the bad tone
+    const replyCalls = vi.mocked(ctx.reply).mock.calls;
+    expect(replyCalls.length).toBe(1);
+    expect(replyCalls[0][0]).toContain("badtone");
+
+    // No job inserted — early return
+    const jobs = db.prepare(`SELECT * FROM jobs`).all();
+    expect(jobs.length).toBe(0);
+  });
+
+  it('11. Valid tone prefix stores tone/shape in pending row', async () => {
+    const ctx = makeCtx({ message: { text: '[funny:heist-reveal] Some story text', message_id: 42 } });
+    const handler = createNarratorHandler(db);
+    await handler(ctx as never);
+
+    const row = db.prepare(`SELECT tone_prefix, shape_prefix FROM pending_length_choices`).get() as
+      { tone_prefix: string | null; shape_prefix: string | null } | undefined;
+    expect(row).toBeTruthy();
+    expect(row?.tone_prefix).toBe('funny');
+    expect(row?.shape_prefix).toBe('heist-reveal');
+  });
+
+  it('12. No prefix stores NULL tone/shape in pending row', async () => {
+    const ctx = makeCtx({ message: { text: 'A story without prefix', message_id: 42 } });
+    const handler = createNarratorHandler(db);
+    await handler(ctx as never);
+
+    const row = db.prepare(`SELECT tone_prefix, shape_prefix FROM pending_length_choices`).get() as
+      { tone_prefix: string | null; shape_prefix: string | null } | undefined;
+    expect(row).toBeTruthy();
+    expect(row?.tone_prefix).toBeNull();
+    expect(row?.shape_prefix).toBeNull();
   });
 });

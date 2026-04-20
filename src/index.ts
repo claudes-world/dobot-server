@@ -18,12 +18,12 @@ async function main(): Promise<void> {
   // Must run after bot creation (needs api + me) but before bot.start().
   const me = await narratorBot.api.getMe();
   rebuildPendingTimeouts(db, narratorBot.api, me,
-    (jobId, length, ctx) => continueNarration(jobId, length, ctx, db));
+    (jobId, length, ctx, toneOverride, shapeOverride, ackMessageId) => continueNarration(jobId, length, ctx, db, toneOverride, shapeOverride, ackMessageId));
 
   registerHandlers(narratorBot, {
     narrator: createNarratorHandler(db),
-    narratorCallback: createLengthCallbackHandler(db, (jobId, length, ctx) =>
-      continueNarration(jobId, length, ctx, db)
+    narratorCallback: createLengthCallbackHandler(db, (jobId, length, ctx, toneOverride, shapeOverride, ackMessageId) =>
+      continueNarration(jobId, length, ctx, db, toneOverride, shapeOverride, ackMessageId)
     ),
     cancel: createCancelHandler(db),
   });
