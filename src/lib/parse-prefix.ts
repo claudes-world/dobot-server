@@ -1,6 +1,4 @@
-// TODO: import from src/lib/classify.ts once that file is committed
-const VALID_TONES = ['funny', 'roast', 'serious', 'poetic', 'sarcastic', 'dramatic'];
-const VALID_SHAPES = ['heist-reveal', 'sports-commentary', 'listicle', 'haiku', 'tweet-thread', 'news-report'];
+import { VALID_TONES, VALID_SHAPES } from './classify.js';
 
 export interface ParsePrefixResult {
   prefixFound: boolean;
