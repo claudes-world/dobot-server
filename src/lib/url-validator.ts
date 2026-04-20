@@ -1,5 +1,6 @@
 import dns from 'node:dns/promises';
 import ipaddr from 'ipaddr.js';
+import { Agent as UndiciAgent } from 'undici';
 
 const ALLOWED_CONTENT_TYPES = ["text/html", "text/markdown", "text/plain"];
 const MAX_REDIRECTS = 3;
@@ -13,11 +14,6 @@ const FETCH_TIMEOUT_MS = 10000;
  *         link-local (169.254/16), CGNAT (100.64/10), unspecified (0.0.0.0/8)
  * - IPv6: loopback (::1), link-local (fe80::/10), ULA (fc00::/7),
  *         IPv4-mapped private addresses
- *
- * TOCTOU note: fetch() re-resolves the hostname at TCP connect time. This
- * check is a best-effort DNS-level guard; it does not prevent DNS rebinding
- * attacks at the socket level. Full mitigation requires an undici dispatcher
- * that pins the resolved IP (deferred).
  */
 function isPrivateAddress(address: string): boolean {
   try {
@@ -53,14 +49,16 @@ function isPrivateAddress(address: string): boolean {
 /**
  * Validates and fetches a URL safely.
  *
- * DNS lookup is performed once per hop and the resolved IP is cached so the
- * same address is used for both the SSRF check and passed to fetch() via the
- * Host header — best-effort TOCTOU mitigation without a custom socket dispatcher.
+ * DNS resolution is performed once per hop via node:dns/promises. The resolved
+ * IP is validated with ipaddr.js (SSRF guard) and then pinned at socket level
+ * using an undici dispatcher — this prevents DNS rebinding attacks where fetch()
+ * might re-resolve to a different IP at TCP connect time.
  *
  * Improvements over Phase 2 regex guard:
  * - ipaddr.js covers IPv6 ULA (fc00::/7), link-local (fe80::/10),
  *   IPv4-mapped private (::ffff:10.x), and CGNAT (100.64.0.0/10)
  * - Fetch timeout reduced to 10 s (was 30 s)
+ * - Undici dispatcher pins the pre-resolved IP — full DNS rebinding protection
  */
 export async function validateAndFetchUrl(urlString: string): Promise<string> {
   // 1. Parse and assert HTTPS
@@ -75,14 +73,14 @@ export async function validateAndFetchUrl(urlString: string): Promise<string> {
   }
 
   /**
-   * Resolve hostname → IP, assert not private/loopback.
-   * Returns the resolved address so callers can cache it for the fetch hop.
-   * Re-called for each redirect hop.
+   * Resolve hostname → validated IPv4 address.
+   * Throws if DNS fails or the address is private/loopback.
+   * Returns the address so it can be pinned in the undici dispatcher.
    */
-  async function resolveAndAssert(hostname: string): Promise<string> {
+  async function resolveAndValidate(hostname: string): Promise<string> {
     let address: string;
     try {
-      const result = await dns.lookup(hostname);
+      const result = await dns.lookup(hostname, { family: 4 });
       address = result.address;
     } catch (err) {
       throw new Error(`DNS resolution failed for ${hostname}: ${err}`);
@@ -103,15 +101,22 @@ export async function validateAndFetchUrl(urlString: string): Promise<string> {
 
   try {
     // 2a. Follow redirects manually (MAX_REDIRECTS enforced, each hop DNS-validated).
-    // resolveAndAssert returns the resolved IP — cached per hop so the SSRF check
-    // and the actual fetch use the same address (best-effort TOCTOU mitigation).
+    // For each hop: resolve the IP, validate it, then pin it in the undici dispatcher
+    // so the actual TCP connection uses exactly that IP (prevents DNS rebinding).
     while (true) {
       const hopUrl = new URL(currentUrl);
-      await resolveAndAssert(hopUrl.hostname);
+      const resolvedIp = await resolveAndValidate(hopUrl.hostname);
+
+      // Pin the pre-resolved IP at socket level — undici will not re-resolve the hostname
+      const dispatcher = new UndiciAgent({
+        connect: { lookup: (_hostname: string, _opts: unknown, cb: (err: Error | null, address: string, family: number) => void) => cb(null, resolvedIp, 4) }
+      });
 
       response = await fetch(currentUrl, {
         signal: controller.signal,
         redirect: 'manual',
+        // @ts-expect-error — undici dispatcher is not in the standard fetch types but is supported by Node.js
+        dispatcher,
       });
 
       if (response.status >= 300 && response.status < 400) {
@@ -166,19 +171,22 @@ export async function validateAndFetchUrl(urlString: string): Promise<string> {
     const raw = Buffer.concat(chunks).toString('utf-8');
 
     // 5. Strip HTML tags for clean text when content-type is text/html.
-    // Simple regex strip — sufficient for narrator source material.
+    // Order matters: decode entities BEFORE stripping tags so that tags encoded
+    // as &lt;script&gt; are not passed through as literal text after stripping.
     // Collapse runs of whitespace introduced by tag removal.
     if (ctBase === 'text/html') {
       return raw
-        .replace(/<script[\s\S]*?<\/script>/gi, '')   // remove script blocks
-        .replace(/<style[\s\S]*?<\/style>/gi, '')      // remove style blocks
-        .replace(/<[^>]+>/g, ' ')                      // strip remaining tags
+        // Decode entities first (before tag stripping)
         .replace(/&nbsp;/gi, ' ')
         .replace(/&amp;/gi, '&')
         .replace(/&lt;/gi, '<')
         .replace(/&gt;/gi, '>')
         .replace(/&quot;/gi, '"')
         .replace(/&#39;/gi, "'")
+        // Now strip tags (which may include newly-decoded ones)
+        .replace(/<script[\s\S]*?<\/script>/gi, '')   // remove script blocks
+        .replace(/<style[\s\S]*?<\/style>/gi, '')      // remove style blocks
+        .replace(/<[^>]+>/g, ' ')                      // strip remaining tags
         .replace(/[ \t]+/g, ' ')
         .replace(/\n{3,}/g, '\n\n')
         .trim();

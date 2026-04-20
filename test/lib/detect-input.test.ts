@@ -14,8 +14,8 @@ describe('detectFilePath', () => {
     expect(detectFilePath('  /home/claude/notes.txt  ')).toBe('/home/claude/notes.txt');
   });
 
-  it('4. path after prefix text (space-separated) — returns path', () => {
-    expect(detectFilePath('[funny] /home/claude/script.sh')).toBe('/home/claude/script.sh');
+  it('4. path after prefix text (space-separated) — returns null (whole-string match only)', () => {
+    expect(detectFilePath('[funny] /home/claude/script.sh')).toBeNull();
   });
 
   it('5. plain prose with no path — returns null', () => {
@@ -44,6 +44,18 @@ describe('detectFilePath', () => {
 
   it('11. tilde without slash — returns null', () => {
     expect(detectFilePath('~notes.md')).toBeNull();
+  });
+
+  it('12. reddit slug in prose — returns null', () => {
+    expect(detectFilePath('I love /r/programming')).toBeNull();
+  });
+
+  it('13. path embedded in prose — returns null', () => {
+    expect(detectFilePath('Please read /etc/passwd carefully')).toBeNull();
+  });
+
+  it('14. path alone (whole-string) — returns path', () => {
+    expect(detectFilePath('/home/claude/file.txt')).toBe('/home/claude/file.txt');
   });
 });
 

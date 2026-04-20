@@ -77,11 +77,12 @@ export function createNarratorHandler(db: Database.Database) {
     if (ctx.chat?.type !== "private") return;
 
     // 1a. Forwarded message detection — check before plain text extraction
+    // Note: forward_origin is the canonical forwarded-message indicator in Bot API 7.x+.
+    // forward_date was removed from grammy types in newer versions.
     const forwardOrigin = ctx.message?.forward_origin;
-    const forwardDate = ctx.message?.forward_date;
     let sourceTextOverride: string | undefined;
 
-    if (forwardOrigin || forwardDate) {
+    if (forwardOrigin) {
       const fwdText = ctx.message?.text ?? ctx.message?.caption;
       if (!fwdText) {
         await ctx.reply('Forwarded message has no text to narrate');
@@ -113,8 +114,9 @@ export function createNarratorHandler(db: Database.Database) {
     const tonePrefix = prefixResult.prefixFound ? prefixResult.tone : null;
     const shapePrefix = prefixResult.prefixFound ? prefixResult.shape : null;
 
-    // File-path detection — if stripped text is (or contains) a file path, read it.
-    const detectedPath = detectFilePath(sourceText.trim());
+    // File-path / URL detection — only run when sourceTextOverride is NOT set.
+    // If sourceTextOverride is set (forwarded message), the text is already the source — skip detection.
+    const detectedPath = sourceTextOverride ? null : detectFilePath(sourceText.trim());
     if (detectedPath !== null) {
       let resolvedPath: string;
       try {
@@ -131,10 +133,12 @@ export function createNarratorHandler(db: Database.Database) {
       }
     } else {
       // URL detection — if stripped text contains an HTTPS URL, fetch it as the source.
-      const detectedUrl = detectUrl(sourceText.trim());
+      const detectedUrl = sourceTextOverride ? null : detectUrl(sourceText.trim());
       if (detectedUrl !== null) {
         try {
-          sourceText = await validateAndFetchUrl(detectedUrl);
+          const fetchedContent = await validateAndFetchUrl(detectedUrl);
+          // Wrap in untrusted boundary to prevent prompt injection from web content
+          sourceText = `<untrusted_source>\n${fetchedContent}\n</untrusted_source>`;
         } catch (err) {
           const msg = String(err);
           if (/private IP/i.test(msg) || /SSRF/i.test(msg)) {

@@ -3,23 +3,21 @@
  * Covers file paths (#55) and URLs (#56).
  */
 
-// Matches absolute paths (/foo/bar) or tilde paths (~/foo/bar).
-// Captures the first such path found in the text.
-const FILE_PATH_RE = /(?:^|\s)((?:\/|~\/)[\w\-./]+)/;
+// Matches an entire trimmed string that is an absolute path (/foo/bar) or tilde path (~/foo/bar).
+// No substring extraction — the whole input must be the path.
+const FILE_PATH_WHOLE_RE = /^(?:\/|~\/)[\w\-./]+$/;
 
 /**
- * Returns the first absolute or tilde-prefixed file path found in `text`, or null.
- * The path must start at the beginning of the string or after whitespace to
- * avoid false-positives inside prose.
+ * Returns the file path if the ENTIRE trimmed `text` is an absolute or tilde-prefixed path.
+ * Returns null if the text contains anything before or after the path (prose, reddit slugs, etc.).
+ * This strict whole-string match prevents false-positives like "/r/programming" inside sentences.
  */
 export function detectFilePath(text: string): string | null {
   const trimmed = text.trim();
-  // Fast path: if the entire trimmed text is a single path token, return it directly.
-  if (/^(?:\/|~\/)[\w\-./]+$/.test(trimmed)) {
+  if (FILE_PATH_WHOLE_RE.test(trimmed)) {
     return trimmed;
   }
-  const m = FILE_PATH_RE.exec(text);
-  return m ? m[1] : null;
+  return null;
 }
 
 // Matches a single HTTPS URL anywhere in the text.
