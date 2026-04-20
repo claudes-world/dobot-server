@@ -166,7 +166,7 @@ export function createNarratorHandler(db: Database.Database) {
               await ctx.api.editMessageText(chatId, ackMessageId, 'Timed out — using default (medium)');
             } catch { /* swallow */ }
           }
-          await continueNarration(jobId, 'medium', ctx, db, still.tone_prefix, still.shape_prefix);
+          await continueNarration(jobId, 'medium', ctx, db, still.tone_prefix, still.shape_prefix, ackMessageId);
         } catch (err) {
           console.error(`narrator: unhandled error in timeout for job ${jobId}:`, err);
         }
@@ -263,7 +263,7 @@ export async function continueNarration(
       shape = shapeOverride ?? 'origin-story';
       console.log(`narrator: job ${jobId} using prefix override — tone=${tone}, shape=${shape}`);
     } else {
-      const classified = await classifyNarrative(sourceText);
+      const classified = await classifyNarrative(sourceText, controller.signal);
       tone = classified.tone;
       shape = classified.shape;
       console.log(`narrator: job ${jobId} classified — tone=${tone}, shape=${shape}, confidence=${classified.confidence}, source=${classified.source}`);

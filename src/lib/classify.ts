@@ -42,7 +42,7 @@ const DEFAULTS: ClassifyResult = {
  * Uses the first 2000 characters for the classify call.
  * Returns defaults on any failure: parse error, is_error envelope, or invalid enum values.
  */
-export async function classifyNarrative(narrative: string): Promise<ClassifyResult> {
+export async function classifyNarrative(narrative: string, abortSignal?: AbortSignal): Promise<ClassifyResult> {
   const excerpt = narrative.slice(0, 2000);
 
   const classifyPrompt = `Classify the tone and narrative shape of this text. Return JSON with fields:
@@ -65,6 +65,7 @@ ${excerpt}`;
         timeout: 60_000,
         cleanup: true,
         killSignal: 'SIGKILL',
+        cancelSignal: abortSignal,
       },
     );
     stdout = result.stdout;

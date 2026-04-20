@@ -74,7 +74,7 @@ export function rebuildPendingTimeouts(
   db: Database.Database,
   api: Api,
   me: UserFromGetMe,
-  onTimeout: (jobId: string, length: 'short' | 'medium' | 'full', ctx: Context, toneOverride: string | null, shapeOverride: string | null) => Promise<void>,
+  onTimeout: (jobId: string, length: 'short' | 'medium' | 'full', ctx: Context, toneOverride: string | null, shapeOverride: string | null, ackMessageId?: number) => Promise<void>,
 ): void {
   const now = Date.now();
   const rows = db.prepare(
@@ -125,7 +125,7 @@ export function rebuildPendingTimeouts(
         };
 
         const ctx = new Context(syntheticUpdate, api, me);
-        await onTimeout(jobId, 'medium', ctx, still.tone_prefix, still.shape_prefix);
+        await onTimeout(jobId, 'medium', ctx, still.tone_prefix, still.shape_prefix, ackMessageId || undefined);
       } catch (err) {
         console.error(`rebuildPendingTimeouts: unhandled error in timeout for job ${row.job_id}:`, err);
       }
