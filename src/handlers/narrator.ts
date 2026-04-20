@@ -158,7 +158,7 @@ export function createNarratorHandler(db: Database.Database) {
           const fetchedContent = await validateAndFetchUrl(detectedUrl);
           // Wrap in untrusted boundary to prevent prompt injection from web content.
           // Escape any closing tag inside the content to prevent early-close injection.
-          const escaped = fetchedContent.replace(/<\/untrusted_source>/gi, '<\\/untrusted_source>');
+          const escaped = fetchedContent.replace(/<\/untrusted_source\s*>/gi, '<\\/untrusted_source>');
           sourceText = `<untrusted_source>\n${escaped}\n</untrusted_source>`;
         } catch (err) {
           const msg = String(err);

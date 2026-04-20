@@ -539,24 +539,26 @@ describe('narratorHandler — forwarded message handling (#57)', () => {
     expect(srcWriteCall![1]).toContain('This is a photo caption from a channel.');
   });
 
-  it('18. Forwarded detection via forward_date only (no forward_origin)', async () => {
+  it('18. forward_date-only message (no forward_origin) treated as regular input — no channel prefix', async () => {
     const { default: fsMock } = await import('node:fs/promises');
     const writeSpy = vi.mocked(fsMock.writeFile);
 
     const ctx = makeCtx({
       message: {
-        text: 'Message detected by forward_date only.',
+        text: 'Message with forward_date but no forward_origin.',
         message_id: 42,
         forward_date: 1700000000,
-        // no forward_origin
+        // no forward_origin — handler uses forward_origin for detection; forward_date alone is ignored
       },
     });
     const handler = createNarratorHandler(db);
     await handler(ctx as never);
 
-    // Should still proceed — no channel prefix since no forward_origin.type === 'channel'
+    // Handler treats this as a plain (non-forwarded) message — no attribution prefix,
+    // and the text is written as-is to the source tmpfile.
     const srcWriteCall = writeSpy.mock.calls.find(c => (c[0] as string).includes('narrator-src-'));
     expect(srcWriteCall).toBeTruthy();
-    expect(srcWriteCall![1]).toBe('Message detected by forward_date only.');
+    expect(srcWriteCall![1]).not.toContain('[Forwarded from');
+    expect(srcWriteCall![1]).toBe('Message with forward_date but no forward_origin.');
   });
 });

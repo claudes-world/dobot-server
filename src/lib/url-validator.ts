@@ -27,6 +27,8 @@ function isPrivateAddress(address: string): boolean {
       'uniqueLocal',
       // CGNAT — ipaddr.js names this 'carrierGradeNat' for IPv4
       'carrierGradeNat',
+      // Reserved / IANA special-purpose ranges not covered above
+      'reserved',
     ];
     if (BLOCKED.includes(range)) return true;
 
@@ -108,98 +110,111 @@ export async function validateAndFetchUrl(urlString: string): Promise<string> {
   let response: Response;
 
   try {
-    // 2a. Follow redirects manually (MAX_REDIRECTS enforced, each hop DNS-validated).
-    // For each hop: resolve the IP, validate it, then pin it in the undici dispatcher
-    // so the actual TCP connection uses exactly that IP (prevents DNS rebinding).
-    while (true) {
-      const hopUrl = new URL(currentUrl);
-      const resolvedIp = await resolveAndValidate(hopUrl.hostname);
+    // lastDispatcher holds the dispatcher for the final (non-redirect) hop.
+    // It must stay alive until the body has been fully streamed (see outer finally below).
+    let lastDispatcher: UndiciAgent | null = null;
+    try {
+      // 2a. Follow redirects manually (MAX_REDIRECTS enforced, each hop DNS-validated).
+      // For each hop: resolve the IP, validate it, then pin it in the undici dispatcher
+      // so the actual TCP connection uses exactly that IP (prevents DNS rebinding).
+      while (true) {
+        const hopUrl = new URL(currentUrl);
+        const resolvedIp = await resolveAndValidate(hopUrl.hostname);
 
-      // Pin the pre-resolved IP at socket level — undici will not re-resolve the hostname
-      const dispatcher = new UndiciAgent({
-        connect: { lookup: (_hostname: string, _opts: unknown, cb: (err: Error | null, address: string, family: number) => void) => cb(null, resolvedIp, 4) }
-      });
-
-      let isRedirect = false;
-      try {
-        response = await fetch(hopUrl.toString(), {
-          signal: controller.signal,
-          redirect: 'manual',
-          // @ts-expect-error — undici dispatcher is not in the standard fetch types but is supported by Node.js
-          dispatcher,
+        // Pin the pre-resolved IP at socket level — undici will not re-resolve the hostname
+        const dispatcher = new UndiciAgent({
+          connect: { lookup: (_hostname: string, _opts: unknown, cb: (err: Error | null, address: string, family: number) => void) => cb(null, resolvedIp, 4) }
         });
 
-        if (response.status >= 300 && response.status < 400) {
-          redirectCount++;
-          if (redirectCount > MAX_REDIRECTS) {
+        let isRedirect = false;
+        try {
+          response = await fetch(hopUrl.toString(), {
+            signal: controller.signal,
+            redirect: 'manual',
+            // @ts-expect-error — undici dispatcher is not in the standard fetch types but is supported by Node.js
+            dispatcher,
+          });
+
+          if (response.status >= 300 && response.status < 400) {
+            redirectCount++;
+            if (redirectCount > MAX_REDIRECTS) {
+              response.body?.cancel().catch(() => {});
+              throw new Error(`Too many redirects (max ${MAX_REDIRECTS})`);
+            }
+            const location = response.headers.get('location');
+            if (!location) throw new Error('Redirect with no Location header');
+            const nextUrl = new URL(location, currentUrl);
+            // Assert redirect target is also HTTPS
+            if (nextUrl.protocol !== 'https:') {
+              throw new Error(`Redirect to non-HTTPS URL: ${nextUrl.protocol}`);
+            }
+            currentUrl = nextUrl.toString();
+            // Drain/cancel the redirect response body to release the underlying connection
             response.body?.cancel().catch(() => {});
-            throw new Error(`Too many redirects (max ${MAX_REDIRECTS})`);
+            isRedirect = true;
+          } else {
+            // Final hop — keep the dispatcher alive until body is fully consumed
+            lastDispatcher = dispatcher;
           }
-          const location = response.headers.get('location');
-          if (!location) throw new Error('Redirect with no Location header');
-          const nextUrl = new URL(location, currentUrl);
-          // Assert redirect target is also HTTPS
-          if (nextUrl.protocol !== 'https:') {
-            throw new Error(`Redirect to non-HTTPS URL: ${nextUrl.protocol}`);
-          }
-          currentUrl = nextUrl.toString();
-          // Drain/cancel the redirect response body to release the underlying connection
-          response.body?.cancel().catch(() => {});
-          isRedirect = true;
+        } finally {
+          // Safe to destroy redirect-hop dispatchers immediately (body already cancelled).
+          // Final-hop dispatcher is NOT destroyed here — lastDispatcher handles it below.
+          if (isRedirect) dispatcher.destroy().catch(() => {});
         }
-      } finally {
-        dispatcher.destroy().catch(() => {});
+
+        if (!isRedirect) break;
       }
 
-      if (!isRedirect) break;
-    }
-
-    // 3. Assert content-type
-    const contentType = response.headers.get('content-type') ?? '';
-    const ctBase = contentType.split(';')[0].trim();
-    if (!ALLOWED_CONTENT_TYPES.some(ct => ctBase === ct)) {
-      response.body?.cancel().catch(() => {});
-      throw new Error(`Disallowed content-type: ${ctBase}`);
-    }
-
-    // 4. Stream body with byte cap (timer still active — covers slow-drip responses)
-    const reader = response.body?.getReader();
-    if (!reader) throw new Error('Response body is null');
-
-    const chunks: Uint8Array[] = [];
-    let totalBytes = 0;
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (value) {
-        totalBytes += value.length;
-        if (totalBytes > MAX_BODY_BYTES) {
-          reader.cancel().catch(() => {});
-          throw new Error(`Response body exceeds ${MAX_BODY_BYTES} bytes`);
-        }
-        chunks.push(value);
+      // 3. Assert content-type
+      const contentType = response.headers.get('content-type') ?? '';
+      const ctBase = contentType.split(';')[0].trim();
+      if (!ALLOWED_CONTENT_TYPES.some(ct => ctBase === ct)) {
+        response.body?.cancel().catch(() => {});
+        throw new Error(`Disallowed content-type: ${ctBase}`);
       }
+
+      // 4. Stream body with byte cap (timer still active — covers slow-drip responses)
+      const reader = response.body?.getReader();
+      if (!reader) throw new Error('Response body is null');
+
+      const chunks: Uint8Array[] = [];
+      let totalBytes = 0;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value) {
+          totalBytes += value.length;
+          if (totalBytes > MAX_BODY_BYTES) {
+            reader.cancel().catch(() => {});
+            throw new Error(`Response body exceeds ${MAX_BODY_BYTES} bytes`);
+          }
+          chunks.push(value);
+        }
+      }
+
+      const raw = Buffer.concat(chunks).toString('utf-8');
+
+      // 5. Strip HTML tags for clean text when content-type is text/html.
+      // Order matters: decode entities BEFORE stripping tags so that tags encoded
+      // as &lt;script&gt; are not passed through as literal text after stripping.
+      // Collapse runs of whitespace introduced by tag removal.
+      if (ctBase === 'text/html') {
+        return he.decode(raw)
+          // Now strip tags (which may include newly-decoded ones)
+          .replace(/<script[\s\S]*?<\/script>/gi, '')   // remove script blocks
+          .replace(/<style[\s\S]*?<\/style>/gi, '')      // remove style blocks
+          .replace(/<[^>]+>/g, ' ')                      // strip remaining tags
+          .replace(/[ \t]+/g, ' ')
+          .replace(/\n{3,}/g, '\n\n')
+          .trim();
+      }
+
+      return raw;
+    } finally {
+      // Destroy the final-hop dispatcher AFTER body has been consumed (or on any throw).
+      lastDispatcher?.destroy().catch(() => {});
     }
-
-    const raw = Buffer.concat(chunks).toString('utf-8');
-
-    // 5. Strip HTML tags for clean text when content-type is text/html.
-    // Order matters: decode entities BEFORE stripping tags so that tags encoded
-    // as &lt;script&gt; are not passed through as literal text after stripping.
-    // Collapse runs of whitespace introduced by tag removal.
-    if (ctBase === 'text/html') {
-      return he.decode(raw)
-        // Now strip tags (which may include newly-decoded ones)
-        .replace(/<script[\s\S]*?<\/script>/gi, '')   // remove script blocks
-        .replace(/<style[\s\S]*?<\/style>/gi, '')      // remove style blocks
-        .replace(/<[^>]+>/g, ' ')                      // strip remaining tags
-        .replace(/[ \t]+/g, ' ')
-        .replace(/\n{3,}/g, '\n\n')
-        .trim();
-    }
-
-    return raw;
   } catch (err) {
     if ((err as Error).name === 'AbortError') {
       throw new Error(`Fetch timed out after ${FETCH_TIMEOUT_MS}ms`);
