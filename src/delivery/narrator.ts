@@ -13,6 +13,8 @@ export interface DeliveryOptions {
   userId: number;
   narrative: string;
   stopReason: string;
+  tone: string;
+  shape: string;
   ctx: Context;
   db: Database.Database;
   ackMessageId?: number;
@@ -20,7 +22,7 @@ export interface DeliveryOptions {
 }
 
 export async function deliverNarration(opts: DeliveryOptions): Promise<void> {
-  const { jobId, userId, narrative, stopReason, ctx, db, ackMessageId, abortSignal } = opts;
+  const { jobId, userId, narrative, stopReason, tone, shape, ctx, db, ackMessageId, abortSignal } = opts;
 
   // 1. Build story file path
   const now = new Date();
@@ -93,7 +95,7 @@ export async function deliverNarration(opts: DeliveryOptions): Promise<void> {
 
   // 5. Build caption
   const truncatedWarning = stopReason === 'max_tokens' ? ' ⚠️ truncated (max_tokens — 12k cap)' : '';
-  const caption = `tone: serious | shape: origin-story | length: medium | tts_chars: ${ttsChars}${truncatedWarning}`;
+  const caption = `tone: ${tone} | shape: ${shape} | tts_chars: ${ttsChars}${truncatedWarning}`;
 
   // 6. Deliver audio or markdown-only fallback
   if (audioGenerated) {

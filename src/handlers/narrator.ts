@@ -8,6 +8,8 @@ import { getTracer, withSpan } from '../lib/otel.js';
 import { deliverNarration } from '../delivery/narrator.js';
 import { buildSubprocessEnv, spawnClaudeWithRetry, ClaudeEnvelope } from '../lib/claude-subprocess.js';
 import { checkAndRecordRate } from '../lib/rate-limit.js';
+import { parsePrefix } from '../lib/parse-prefix.js';
+import { classifyNarrative } from '../lib/classify.js';
 
 const SYSTEM_PROMPT_PARTS = [
   '/home/claude/claudes-world/agents/narrator/.claude/output-styles/narrator.md',
@@ -65,8 +67,20 @@ export function createNarratorHandler(db: Database.Database) {
     // 2. DM-only — silently reject group/supergroup/channel messages (#47)
     if (ctx.chat?.type !== "private") return;
 
-    const sourceText = ctx.message?.text;
-    if (!sourceText) return;
+    const rawText = ctx.message?.text;
+    if (!rawText) return;
+
+    // 1a. Parse prefix — validate tone/shape override before anything else
+    const prefixResult = parsePrefix(rawText);
+    if ('error' in prefixResult) {
+      await ctx.reply(prefixResult.error);
+      return;
+    }
+
+    // prefixResult.text is the stripped text (prefix removed if found)
+    const sourceText = prefixResult.text;
+    const tonePrefix = prefixResult.prefixFound ? prefixResult.tone : null;
+    const shapePrefix = prefixResult.prefixFound ? prefixResult.shape : null;
 
     // Word-count guard — reject oversized input before spawning subprocess
     const wordCount = sourceText.split(/\s+/).filter(Boolean).length;
@@ -120,11 +134,12 @@ export function createNarratorHandler(db: Database.Database) {
 
       // 5. Record pending length choice — always insert so timeout can fire even if ack failed.
       // keyboard_msg_id = 0 signals ack was not sent (no message to edit on timeout).
+      // tone_prefix/shape_prefix non-null only when user provided a [tone:shape] prefix override.
       const expiresAt = Date.now() + config.narrator.lengthTimeoutMs;
       db.prepare(`
         INSERT INTO pending_length_choices (job_id, chat_id, keyboard_msg_id, source_tmpfile, tone_prefix, shape_prefix, expires_at)
-        VALUES (?, ?, ?, ?, NULL, NULL, ?)
-      `).run(jobId, chatId, ackMessageId ?? 0, sourceTmpFile, expiresAt);
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run(jobId, chatId, ackMessageId ?? 0, sourceTmpFile, tonePrefix, shapePrefix, expiresAt);
 
       // 6. Default timeout — use medium if user doesn't tap within lengthTimeoutMs
       const timeoutHandle = setTimeout(async () => {
@@ -198,9 +213,9 @@ export async function continueNarration(
     return;
   }
 
-  // Find the ack message id to update user on progress
-  const pendingRow = db.prepare(`SELECT keyboard_msg_id FROM pending_length_choices WHERE job_id = ?`).get(jobId) as
-    | { keyboard_msg_id: number }
+  // Find the ack message id and any stored prefix overrides
+  const pendingRow = db.prepare(`SELECT keyboard_msg_id, tone_prefix, shape_prefix FROM pending_length_choices WHERE job_id = ?`).get(jobId) as
+    | { keyboard_msg_id: number; tone_prefix: string | null; shape_prefix: string | null }
     | undefined;
   // Note: pending row may already be deleted by the callback handler — that's fine
   // We get ackMessageId from the callback-edited message (already shows "Rewriting in X mode…")
@@ -229,10 +244,39 @@ export async function continueNarration(
   activeJobs.set(chatId, { controller, jobId, ackMessageId });
 
   try {
-    // Build system prompt file
+    // Resolve tone + shape:
+    // If user provided a prefix override, use those values; otherwise classify the source text.
+    let tone: string;
+    let shape: string;
+    if (pendingRow?.tone_prefix) {
+      tone = pendingRow.tone_prefix;
+      shape = pendingRow.shape_prefix ?? 'origin-story';
+      console.log(`narrator: job ${jobId} using prefix override — tone=${tone}, shape=${shape}`);
+    } else {
+      const classified = await classifyNarrative(sourceText);
+      tone = classified.tone;
+      shape = classified.shape;
+      console.log(`narrator: job ${jobId} classified — tone=${tone}, shape=${shape}, confidence=${classified.confidence}, source=${classified.source}`);
+    }
+
+    // Build system prompt file — base persona + tone skill + shape skill
     sysTmpFile = path.join(config.narrator.tmpDir, `narrator-sys-${jobId}.md`);
-    const parts = await Promise.all(SYSTEM_PROMPT_PARTS.map(p => fs.readFile(p, 'utf8')));
-    await fs.writeFile(sysTmpFile, parts.join('\n\n---\n\n'));
+    const toneSkillPath = `/home/claude/claudes-world/agents/narrator/.claude/skills/tone-${tone}/SKILL.md`;
+    const shapeSkillPath = `/home/claude/claudes-world/agents/narrator/.claude/skills/shape-${shape}/SKILL.md`;
+
+    const systemParts = [...SYSTEM_PROMPT_PARTS];
+    // Only append skill files that exist — missing skills are non-fatal (graceful degradation)
+    for (const skillPath of [toneSkillPath, shapeSkillPath]) {
+      try {
+        await fs.access(skillPath);
+        systemParts.push(skillPath);
+      } catch {
+        console.warn(`narrator: skill file not found (skipping): ${skillPath}`);
+      }
+    }
+
+    const partContents = await Promise.all(systemParts.map(p => fs.readFile(p, 'utf8')));
+    await fs.writeFile(sysTmpFile, partContents.join('\n\n---\n\n'));
 
     const userPrompt = `${BASE_USER_PROMPT}\n${LENGTH_INSTRUCTIONS[length]}`;
 
@@ -305,6 +349,8 @@ export async function continueNarration(
       userId,
       narrative,
       stopReason,
+      tone,
+      shape,
       ctx,
       db,
       ackMessageId,
