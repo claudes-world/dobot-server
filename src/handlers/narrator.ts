@@ -10,6 +10,8 @@ import { buildSubprocessEnv, spawnClaudeWithRetry, ClaudeEnvelope } from '../lib
 import { checkAndRecordRate } from '../lib/rate-limit.js';
 import { parsePrefix } from '../lib/parse-prefix.js';
 import { classifyNarrative } from '../lib/classify.js';
+import { detectFilePath } from '../lib/detect-input.js';
+import { validateFilePath } from '../lib/path-validator.js';
 
 function narratorSkillPath(...parts: string[]): string {
   return path.join(config.narrator.narratorRoot, ...parts);
@@ -73,10 +75,32 @@ export function createNarratorHandler(db: Database.Database) {
     // 2. DM-only — silently reject group/supergroup/channel messages (#47)
     if (ctx.chat?.type !== "private") return;
 
-    const rawText = ctx.message?.text;
+    // 1a. Forwarded message detection — check before plain text extraction
+    const forwardOrigin = ctx.message?.forward_origin;
+    const forwardDate = ctx.message?.forward_date;
+    let sourceTextOverride: string | undefined;
+
+    if (forwardOrigin || forwardDate) {
+      const fwdText = ctx.message?.text ?? ctx.message?.caption;
+      if (!fwdText) {
+        await ctx.reply('Forwarded message has no text to narrate');
+        return;
+      }
+      // Prepend channel name/title as context if forwarded from a channel
+      if (forwardOrigin && (forwardOrigin as { type: string }).type === 'channel') {
+        const channelName = (forwardOrigin as { chat?: { title?: string; username?: string } }).chat?.title
+          ?? (forwardOrigin as { chat?: { title?: string; username?: string } }).chat?.username
+          ?? 'Unknown Channel';
+        sourceTextOverride = `[Forwarded from ${channelName}]\n\n${fwdText}`;
+      } else {
+        sourceTextOverride = fwdText;
+      }
+    }
+
+    const rawText = sourceTextOverride ?? ctx.message?.text;
     if (!rawText) return;
 
-    // 1a. Parse prefix — validate tone/shape override before anything else
+    // 1b. Parse prefix — validate tone/shape override before anything else
     const prefixResult = parsePrefix(rawText);
     if ('error' in prefixResult) {
       await ctx.reply(prefixResult.error);
@@ -84,9 +108,27 @@ export function createNarratorHandler(db: Database.Database) {
     }
 
     // prefixResult.text is the stripped text (prefix removed if found)
-    const sourceText = prefixResult.text;
+    let sourceText = prefixResult.text;
     const tonePrefix = prefixResult.prefixFound ? prefixResult.tone : null;
     const shapePrefix = prefixResult.prefixFound ? prefixResult.shape : null;
+
+    // File-path detection — if stripped text is (or contains) a file path, read it.
+    const detectedPath = detectFilePath(sourceText.trim());
+    if (detectedPath !== null) {
+      let resolvedPath: string;
+      try {
+        resolvedPath = validateFilePath(detectedPath);
+      } catch (err) {
+        await ctx.reply(`Cannot read file: ${String(err)}`);
+        return;
+      }
+      try {
+        sourceText = await fs.readFile(resolvedPath, 'utf8');
+      } catch (err) {
+        await ctx.reply(`Failed to read file: ${String(err)}`);
+        return;
+      }
+    }
 
     // Empty-body guard — reject prefix-only input (e.g. "[funny]" with no text)
     if (!sourceText.trim()) {
