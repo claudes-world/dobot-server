@@ -1,7 +1,14 @@
 import { Context, InlineKeyboard, Bot } from 'grammy';
 import fs from 'node:fs/promises';
+import path from 'node:path';
+import os from 'node:os';
+import { randomUUID } from 'node:crypto';
 import { execa } from 'execa';
 import { config } from '../config.js';
+
+function toBase64url(s: string): string {
+  return Buffer.from(s).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
 
 /** Format the "from" field: "Display Name (@username)" or just "Display Name". */
 function formatFrom(ctx: Context): string {
@@ -64,7 +71,7 @@ async function appendIdea(opts: {
 
 /** Build the CPC t.me deep-link button for the idea file. */
 function buildIdeaKeyboard(): InlineKeyboard {
-  const deepLink = `https://t.me/claude_do_bot/pocket?startapp=${encodeURIComponent(config.ideaCapture.ideaFile)}`;
+  const deepLink = `https://t.me/claude_do_bot/pocket?startapp=${toBase64url(config.ideaCapture.ideaFile)}`;
   return new InlineKeyboard().url('View in Pocket', deepLink);
 }
 
@@ -105,7 +112,7 @@ export function createIdeaCaptureHandler(bot: Bot) {
     // --- Voice message ---
     const voice = ctx.message?.voice;
     if (voice) {
-      const tempPath = `/tmp/dobot-voice-${Date.now()}.oga`;
+      const tempPath = path.join(os.tmpdir(), `idea-voice-${randomUUID()}.oga`);
       try {
         await downloadTelegramFile(bot, voice.file_id, tempPath);
 
@@ -136,7 +143,7 @@ export function createIdeaCaptureHandler(bot: Bot) {
     if (photos && photos.length > 0) {
       // Telegram sends photos sorted by size — take the largest
       const largest = photos[photos.length - 1];
-      const tempPath = `/tmp/dobot-photo-${Date.now()}.jpg`;
+      const tempPath = path.join(os.tmpdir(), `idea-photo-${randomUUID()}.jpg`);
       try {
         await downloadTelegramFile(bot, largest.file_id, tempPath);
 
@@ -146,8 +153,9 @@ export function createIdeaCaptureHandler(bot: Bot) {
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         console.error('[idea-capture/photo] Error:', msg);
+        await ctx.reply(`Photo processing failed: ${msg}`).catch(() => {});
+      } finally {
         try { await fs.unlink(tempPath); } catch { /* may not exist */ }
-        await ctx.reply(`Photo processing failed: ${msg}`);
       }
       return;
     }

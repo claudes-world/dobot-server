@@ -167,7 +167,7 @@ describe('ideaCaptureHandler — voice messages', () => {
     expect(execaMock).toHaveBeenCalledOnce();
     const [bin, args] = execaMock.mock.calls[0] as [string, string[]];
     expect(bin).toBe('/home/claude/bin/transcribe');
-    expect(args[0]).toMatch(/^\/tmp\/dobot-voice-\d+\.oga$/);
+    expect(args[0]).toMatch(/idea-voice-[0-9a-f-]+\.oga$/);
 
     // appendFile called with transcribed content
     expect(appendSpy).toHaveBeenCalledOnce();
@@ -199,6 +199,60 @@ describe('ideaCaptureHandler — voice messages', () => {
 
     expect(unlinkSpy).toHaveBeenCalledOnce();
     const unlinkedPath = unlinkSpy.mock.calls[0][0] as string;
-    expect(unlinkedPath).toMatch(/^\/tmp\/dobot-voice-\d+\.oga$/);
+    expect(unlinkedPath).toMatch(/idea-voice-[0-9a-f-]+\.oga$/);
+  });
+});
+
+describe('ideaCaptureHandler — photo messages', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockFetch();
+  });
+
+  it('7. Photo temp file deleted after successful save', async () => {
+    const { default: fsMock } = await import('node:fs/promises');
+    const unlinkSpy = vi.mocked(fsMock.unlink);
+
+    const bot = makeBot();
+    const ctx = makeCtx({
+      message: {
+        message_id: 42,
+        caption: 'cool idea',
+        photo: [
+          { file_id: 'photo-small', width: 100, height: 100 },
+          { file_id: 'photo-large', width: 800, height: 600 },
+        ],
+      },
+    });
+
+    const handler = createIdeaCaptureHandler(bot as never);
+    await handler(ctx as never);
+
+    expect(unlinkSpy).toHaveBeenCalledOnce();
+    const unlinkedPath = unlinkSpy.mock.calls[0][0] as string;
+    expect(unlinkedPath).toMatch(/idea-photo-[0-9a-f-]+\.jpg$/);
+  });
+
+  it('8. Photo temp file deleted even when appendFile fails', async () => {
+    const { default: fsMock } = await import('node:fs/promises');
+    const appendSpy = vi.mocked(fsMock.appendFile);
+    const unlinkSpy = vi.mocked(fsMock.unlink);
+
+    appendSpy.mockRejectedValueOnce(new Error('disk full'));
+
+    const bot = makeBot();
+    const ctx = makeCtx({
+      message: {
+        message_id: 42,
+        photo: [{ file_id: 'photo-large', width: 800, height: 600 }],
+      },
+    });
+
+    const handler = createIdeaCaptureHandler(bot as never);
+    await handler(ctx as never);
+
+    expect(unlinkSpy).toHaveBeenCalledOnce();
+    const unlinkedPath = unlinkSpy.mock.calls[0][0] as string;
+    expect(unlinkedPath).toMatch(/idea-photo-[0-9a-f-]+\.jpg$/);
   });
 });

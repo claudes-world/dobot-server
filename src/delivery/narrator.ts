@@ -8,6 +8,10 @@ import { config } from '../config.js';
 import { buildSubprocessEnv } from '../lib/claude-subprocess.js';
 import { recordSpend } from '../lib/rate-limit.js';
 
+function toBase64url(s: string): string {
+  return Buffer.from(s).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
 export interface DeliveryOptions {
   jobId: string;
   userId: number;
@@ -54,7 +58,7 @@ export async function deliverNarration(opts: DeliveryOptions): Promise<void> {
   await fs.writeFile(mdPath, finalNarrative);
 
   // 2. Construct CPC deep link directly from mdPath
-  const deepLink: string = `https://t.me/claude_do_bot/pocket?startapp=${encodeURIComponent(mdPath)}`;
+  const deepLink: string = `https://t.me/claude_do_bot/pocket?startapp=${toBase64url(mdPath)}`;
 
   // 3. Invoke md-speak --no-describe to generate audio
   const mp3Path = mdPath.replace(/\.md$/, '.mp3');

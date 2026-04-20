@@ -36,6 +36,9 @@ async function main(): Promise<void> {
   if (ideaBotToken) {
     ideaBot = createBot(ideaBotToken);
     ideaBot.on('message', createIdeaCaptureHandler(ideaBot));
+    if (config.ideaCapture.allowedUserIds.size === 0) {
+      console.warn('dobot-server: IDEA_ALLOWED_USER_IDS is not set — idea bot will reject all messages');
+    }
     console.log('dobot-server: idea capture bot enabled');
   } else {
     console.warn('dobot-server: TELEGRAM_IDEA_BOT_TOKEN not set — idea capture bot disabled');
@@ -58,9 +61,13 @@ async function main(): Promise<void> {
   process.once('SIGTERM', () => { shutdown().catch(console.error); });
 
   console.log('dobot-server listening...');
-  const botPromises: Promise<void>[] = [narratorBot.start()];
-  if (ideaBot) botPromises.push(ideaBot.start());
-  await Promise.all(botPromises);
+  try {
+    await Promise.all([narratorBot.start(), ...(ideaBot ? [ideaBot.start()] : [])]);
+  } catch (err) {
+    console.error('Bot startup failed — shutting down', err);
+    await shutdown();
+    process.exit(1);
+  }
 }
 
 main().catch((err) => {
