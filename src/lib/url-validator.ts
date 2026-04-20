@@ -159,7 +159,7 @@ export async function validateAndFetchUrl(urlString: string): Promise<string> {
         } finally {
           // Safe to destroy redirect-hop dispatchers immediately (body already cancelled).
           // Final-hop dispatcher is NOT destroyed here — lastDispatcher handles it below.
-          if (isRedirect) dispatcher.destroy().catch(() => {});
+          if (lastDispatcher !== dispatcher) dispatcher.destroy().catch(() => {});
         }
 
         if (!isRedirect) break;
