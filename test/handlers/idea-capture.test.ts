@@ -236,7 +236,7 @@ describe('ideaCaptureHandler — photo messages', () => {
     expect(writtenPath).toMatch(/\/tmp\/ideas-photos\/idea-photo-[0-9a-f-]+\.jpg$/);
   });
 
-  it('8. Photo error reply sent when appendFile fails (no unlink)', async () => {
+  it('8. Photo error reply sent and orphan cleaned up when appendFile fails', async () => {
     const { default: fsMock } = await import('node:fs/promises');
     const appendSpy = vi.mocked(fsMock.appendFile);
     const unlinkSpy = vi.mocked(fsMock.unlink);
@@ -254,10 +254,10 @@ describe('ideaCaptureHandler — photo messages', () => {
     const handler = createIdeaCaptureHandler(bot as never);
     await handler(ctx as never);
 
-    // No temp file to unlink — error reply sent instead
-    expect(unlinkSpy).not.toHaveBeenCalled();
+    // Orphaned permanent photo file should be cleaned up on error
+    expect(unlinkSpy).toHaveBeenCalledOnce();
     expect(vi.mocked(ctx.reply)).toHaveBeenCalledWith(
-      expect.stringMatching(/Photo processing failed/),
+      expect.stringMatching(/Failed to save photo/),
     );
   });
 });

@@ -41,7 +41,12 @@ function isoTimestampET(date: Date): string {
 
 /** Download a Telegram file by file_id and save to destPath. */
 async function downloadTelegramFile(bot: Bot, fileId: string, destPath: string, signal?: AbortSignal): Promise<void> {
-  const file = await bot.api.getFile(fileId);
+  const file = await Promise.race([
+    bot.api.getFile(fileId),
+    new Promise<never>((_, reject) =>
+      signal?.addEventListener('abort', () => reject(new Error('getFile timeout')))
+    ),
+  ]);
   if (!file.file_path) {
     throw new Error(`Telegram returned no file_path for file_id ${fileId}`);
   }
@@ -161,12 +166,14 @@ export function createIdeaCaptureHandler(bot: Bot) {
         }
 
         const caption = ctx.message?.caption ?? '';
-        await appendIdea({ type: 'photo', from, timestamp, body: caption, photoPath: permanentPath });
+        const relPath = path.relative(os.homedir(), permanentPath);
+        await appendIdea({ type: 'photo', from, timestamp, body: caption, photoPath: relPath });
         await ctx.reply('✅ Idea saved', { reply_markup: keyboard });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         console.error('[idea-capture/photo] Error:', msg);
-        await ctx.reply(`Photo processing failed: ${msg}`).catch(() => {});
+        try { await fs.unlink(permanentPath); } catch { }
+        await ctx.reply('⚠️ Failed to save photo').catch(() => {});
       }
       return;
     }
