@@ -413,3 +413,152 @@ describe('narratorHandler — prefix parsing (message phase)', () => {
     expect(row?.shape_prefix).toBeNull();
   });
 });
+
+describe('narratorHandler — forwarded message handling (#57)', () => {
+  let db: Database.Database;
+
+  beforeEach(() => {
+    db = createTestDb();
+    vi.clearAllMocks();
+    vi.mocked(spawnClaudeWithRetry).mockResolvedValue(mockSuccessEnvelope);
+    vi.mocked(deliverNarration).mockResolvedValue(undefined);
+  });
+
+  it('13. Forwarded message from channel — prepends channel title and proceeds', async () => {
+    const ctx = makeCtx({
+      message: {
+        text: 'Big news from the channel!',
+        message_id: 42,
+        forward_origin: {
+          type: 'channel',
+          chat: { title: 'Tech Digest', username: 'techdigest' },
+        },
+      },
+    });
+    const handler = createNarratorHandler(db);
+    await handler(ctx as never);
+
+    // Should insert a pending_length_choices row (forwarded message processed as valid input)
+    const rows = db.prepare(`SELECT * FROM pending_length_choices`).all();
+    expect(rows.length).toBe(1);
+
+    // Should have sent the length keyboard ack
+    expect(ctx.reply).toHaveBeenCalledWith(
+      expect.stringContaining('length'),
+      expect.objectContaining({ reply_markup: expect.anything() })
+    );
+  });
+
+  it('14. Forwarded channel message — source text written with [Forwarded from ...] prefix', async () => {
+    const { default: fsMock } = await import('node:fs/promises');
+    const writeSpy = vi.mocked(fsMock.writeFile);
+
+    const ctx = makeCtx({
+      message: {
+        text: 'Some channel post content.',
+        message_id: 42,
+        forward_origin: {
+          type: 'channel',
+          chat: { title: 'Daily Briefing' },
+        },
+      },
+    });
+    const handler = createNarratorHandler(db);
+    await handler(ctx as never);
+
+    // Find the call that wrote the source tmpfile (not the sys prompt file)
+    const srcWriteCall = writeSpy.mock.calls.find(c => (c[0] as string).includes('narrator-src-'));
+    expect(srcWriteCall).toBeTruthy();
+    expect(srcWriteCall![1]).toContain('[Forwarded from Daily Briefing]');
+    expect(srcWriteCall![1]).toContain('Some channel post content.');
+  });
+
+  it('15. Forwarded message from non-channel (user) — no channel prefix prepended', async () => {
+    const { default: fsMock } = await import('node:fs/promises');
+    const writeSpy = vi.mocked(fsMock.writeFile);
+
+    const ctx = makeCtx({
+      message: {
+        text: 'A forwarded personal message.',
+        message_id: 42,
+        forward_origin: {
+          type: 'user',
+          sender_user: { id: 999, first_name: 'Alice' },
+        },
+      },
+    });
+    const handler = createNarratorHandler(db);
+    await handler(ctx as never);
+
+    const srcWriteCall = writeSpy.mock.calls.find(c => (c[0] as string).includes('narrator-src-'));
+    expect(srcWriteCall).toBeTruthy();
+    // No [Forwarded from ...] prefix for non-channel
+    expect(srcWriteCall![1]).not.toContain('[Forwarded from');
+    expect(srcWriteCall![1]).toBe('A forwarded personal message.');
+  });
+
+  it('16. Forwarded message with no text — replies with error and returns early', async () => {
+    const ctx = makeCtx({
+      message: {
+        message_id: 42,
+        forward_origin: { type: 'channel', chat: { title: 'Silent Channel' } },
+        // no text, no caption
+      },
+    });
+    const handler = createNarratorHandler(db);
+    await handler(ctx as never);
+
+    expect(ctx.reply).toHaveBeenCalledWith('Forwarded message has no text to narrate');
+
+    // No job inserted — early return
+    const jobs = db.prepare(`SELECT * FROM jobs`).all();
+    expect(jobs.length).toBe(0);
+  });
+
+  it('17. Forwarded message with caption (no text) — uses caption as source', async () => {
+    const { default: fsMock } = await import('node:fs/promises');
+    const writeSpy = vi.mocked(fsMock.writeFile);
+
+    const ctx = makeCtx({
+      message: {
+        message_id: 42,
+        caption: 'This is a photo caption from a channel.',
+        forward_date: 1700000000,
+        forward_origin: {
+          type: 'channel',
+          chat: { title: 'Photo Feed' },
+        },
+      },
+    });
+    const handler = createNarratorHandler(db);
+    await handler(ctx as never);
+
+    const srcWriteCall = writeSpy.mock.calls.find(c => (c[0] as string).includes('narrator-src-'));
+    expect(srcWriteCall).toBeTruthy();
+    expect(srcWriteCall![1]).toContain('[Forwarded from Photo Feed]');
+    expect(srcWriteCall![1]).toContain('This is a photo caption from a channel.');
+  });
+
+  it('18. forward_date-only message (no forward_origin) treated as regular input — no channel prefix', async () => {
+    const { default: fsMock } = await import('node:fs/promises');
+    const writeSpy = vi.mocked(fsMock.writeFile);
+
+    const ctx = makeCtx({
+      message: {
+        text: 'Message with forward_date but no forward_origin.',
+        message_id: 42,
+        forward_date: 1700000000,
+        // no forward_origin — handler uses forward_origin for detection; forward_date alone is ignored
+      },
+    });
+    const handler = createNarratorHandler(db);
+    await handler(ctx as never);
+
+    // Handler treats this as a plain (non-forwarded) message — no attribution prefix,
+    // and the text is written as-is to the source tmpfile.
+    const srcWriteCall = writeSpy.mock.calls.find(c => (c[0] as string).includes('narrator-src-'));
+    expect(srcWriteCall).toBeTruthy();
+    expect(srcWriteCall![1]).not.toContain('[Forwarded from');
+    expect(srcWriteCall![1]).toBe('Message with forward_date but no forward_origin.');
+  });
+});

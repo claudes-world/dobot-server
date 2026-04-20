@@ -10,6 +10,9 @@ import { buildSubprocessEnv, spawnClaudeWithRetry, ClaudeEnvelope } from '../lib
 import { checkAndRecordRate } from '../lib/rate-limit.js';
 import { parsePrefix } from '../lib/parse-prefix.js';
 import { classifyNarrative } from '../lib/classify.js';
+import { detectFilePath, detectUrl } from '../lib/detect-input.js';
+import { validateFilePath } from '../lib/path-validator.js';
+import { validateAndFetchUrl } from '../lib/url-validator.js';
 
 function narratorSkillPath(...parts: string[]): string {
   return path.join(config.narrator.narratorRoot, ...parts);
@@ -73,20 +76,101 @@ export function createNarratorHandler(db: Database.Database) {
     // 2. DM-only — silently reject group/supergroup/channel messages (#47)
     if (ctx.chat?.type !== "private") return;
 
-    const rawText = ctx.message?.text;
+    // 1a. Forwarded message detection — check before plain text extraction
+    // Note: forward_origin is the canonical forwarded-message indicator in Bot API 7.x+.
+    // forward_date was removed from grammy types in newer versions.
+    const forwardOrigin = ctx.message?.forward_origin;
+    let sourceTextOverride: string | undefined;
+
+    // Pre-parsed prefix from forwarded message — set when the forwarded text itself
+    // contains a [tone:shape] override. Avoids running parsePrefix on the combined
+    // attribution+content string where the attribution would shadow the prefix.
+    let forwardedPrefixResult: ReturnType<typeof parsePrefix> | undefined;
+
+    if (forwardOrigin) {
+      const fwdText = ctx.message?.text ?? ctx.message?.caption;
+      if (!fwdText) {
+        await ctx.reply('Forwarded message has no text to narrate');
+        return;
+      }
+      // 1. Parse prefix from raw forwarded text BEFORE prepending attribution.
+      // This ensures [tone:shape] in the forwarded content is honoured correctly.
+      const fwdParsed = parsePrefix(fwdText);
+      if ('error' in fwdParsed) {
+        await ctx.reply(fwdParsed.error);
+        return;
+      }
+      forwardedPrefixResult = fwdParsed;
+
+      // 2. Prepend channel attribution AFTER prefix stripping
+      if (forwardOrigin && (forwardOrigin as { type: string }).type === 'channel') {
+        const channelName = (forwardOrigin as { chat?: { title?: string; username?: string } }).chat?.title
+          ?? (forwardOrigin as { chat?: { title?: string; username?: string } }).chat?.username
+          ?? 'Unknown Channel';
+        // sourceTextOverride = attribution + stripped forwarded text (no tone prefix)
+        sourceTextOverride = `[Forwarded from ${channelName}]\n\n${fwdParsed.text}`;
+      } else {
+        sourceTextOverride = fwdParsed.text;
+      }
+    }
+
+    const rawText = sourceTextOverride ?? ctx.message?.text;
     if (!rawText) return;
 
-    // 1a. Parse prefix — validate tone/shape override before anything else
-    const prefixResult = parsePrefix(rawText);
+    // 1b. Parse prefix — validate tone/shape override before anything else.
+    // For forwarded messages, prefix was already parsed from raw fwdText above;
+    // skip re-parsing to avoid attribution string shadowing the prefix.
+    const prefixResult = forwardedPrefixResult ?? parsePrefix(rawText);
     if ('error' in prefixResult) {
       await ctx.reply(prefixResult.error);
       return;
     }
 
     // prefixResult.text is the stripped text (prefix removed if found)
-    const sourceText = prefixResult.text;
+    // For forwarded messages, sourceTextOverride already contains the stripped text
+    // (with attribution prepended), so use sourceTextOverride if set.
+    let sourceText = sourceTextOverride ?? prefixResult.text;
     const tonePrefix = prefixResult.prefixFound ? prefixResult.tone : null;
     const shapePrefix = prefixResult.prefixFound ? prefixResult.shape : null;
+
+    // File-path / URL detection — only run when sourceTextOverride is NOT set.
+    // If sourceTextOverride is set (forwarded message), the text is already the source — skip detection.
+    const detectedPath = sourceTextOverride ? null : detectFilePath(sourceText.trim());
+    if (detectedPath !== null) {
+      let resolvedPath: string;
+      try {
+        resolvedPath = validateFilePath(detectedPath);
+      } catch (err) {
+        await ctx.reply(`Cannot read file: ${String(err)}`);
+        return;
+      }
+      try {
+        sourceText = await fs.readFile(resolvedPath, 'utf8');
+      } catch (err) {
+        await ctx.reply(`Failed to read file: ${String(err)}`);
+        return;
+      }
+    } else {
+      // URL detection — if stripped text contains an HTTPS URL, fetch it as the source.
+      const detectedUrl = sourceTextOverride ? null : detectUrl(sourceText.trim());
+      if (detectedUrl !== null) {
+        try {
+          const fetchedContent = await validateAndFetchUrl(detectedUrl);
+          // Wrap in untrusted boundary to prevent prompt injection from web content.
+          // Escape any closing tag inside the content to prevent early-close injection.
+          const escaped = fetchedContent.replace(/<\/untrusted_source\s*>/gi, '<\\/untrusted_source>');
+          sourceText = `<untrusted_source>\n${escaped}\n</untrusted_source>`;
+        } catch (err) {
+          const msg = String(err);
+          if (/private IP/i.test(msg) || /SSRF/i.test(msg)) {
+            await ctx.reply('Cannot fetch that URL: it resolves to a private or reserved address.');
+          } else {
+            await ctx.reply(`Failed to fetch URL: ${msg}`);
+          }
+          return;
+        }
+      }
+    }
 
     // Empty-body guard — reject prefix-only input (e.g. "[funny]" with no text)
     if (!sourceText.trim()) {
