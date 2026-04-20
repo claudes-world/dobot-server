@@ -154,6 +154,7 @@ export function createIdeaCaptureHandler(bot: Bot) {
       // Telegram sends photos sorted by size — take the largest
       const largest = photos[photos.length - 1];
       const permanentPath = path.join(config.ideaCapture.photosDir, `idea-photo-${randomUUID()}.jpg`);
+      let recorded = false;
       try {
         await fs.mkdir(config.ideaCapture.photosDir, { recursive: true });
 
@@ -166,13 +167,17 @@ export function createIdeaCaptureHandler(bot: Bot) {
         }
 
         const caption = ctx.message?.caption ?? '';
-        const relPath = path.relative(os.homedir(), permanentPath);
+        const relPath = path.relative(path.dirname(config.ideaCapture.ideaFile), permanentPath);
         await appendIdea({ type: 'photo', from, timestamp, body: caption, photoPath: relPath });
+        recorded = true;  // file is now referenced in the idea entry
         await ctx.reply('✅ Idea saved', { reply_markup: keyboard });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         console.error('[idea-capture/photo] Error:', msg);
-        try { await fs.unlink(permanentPath); } catch { }
+        if (!recorded) {
+          // Only clean up if the entry was never committed
+          try { await fs.unlink(permanentPath); } catch { }
+        }
         await ctx.reply('⚠️ Failed to save photo').catch(() => {});
       }
       return;
