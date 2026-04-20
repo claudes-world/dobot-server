@@ -17,7 +17,7 @@ function getAllowedPrefixes(): string[] {
   }
   return DEFAULT_ALLOWED_PREFIXES;
 }
-const DENY_PATTERNS = [/\.secrets/, /\.ssh/, /\.gnupg/, /\.credentials\.json$/, /\.env$/];
+const DENY_PATTERNS = [/\.secrets/, /\.ssh/, /\.gnupg/, /\.credentials\.json$/, /\.env[^/]*$/, /\/\.claude\//];
 const ALLOWED_EXT = [".md", ".txt", ".rst", ".org", ".js", ".ts", ".json", ".py", ".sh"];
 const MAX_SOURCE_BYTES = 500 * 1024;
 

@@ -82,35 +82,54 @@ export function createNarratorHandler(db: Database.Database) {
     const forwardOrigin = ctx.message?.forward_origin;
     let sourceTextOverride: string | undefined;
 
+    // Pre-parsed prefix from forwarded message — set when the forwarded text itself
+    // contains a [tone:shape] override. Avoids running parsePrefix on the combined
+    // attribution+content string where the attribution would shadow the prefix.
+    let forwardedPrefixResult: ReturnType<typeof parsePrefix> | undefined;
+
     if (forwardOrigin) {
       const fwdText = ctx.message?.text ?? ctx.message?.caption;
       if (!fwdText) {
         await ctx.reply('Forwarded message has no text to narrate');
         return;
       }
-      // Prepend channel name/title as context if forwarded from a channel
+      // 1. Parse prefix from raw forwarded text BEFORE prepending attribution.
+      // This ensures [tone:shape] in the forwarded content is honoured correctly.
+      const fwdParsed = parsePrefix(fwdText);
+      if ('error' in fwdParsed) {
+        await ctx.reply(fwdParsed.error);
+        return;
+      }
+      forwardedPrefixResult = fwdParsed;
+
+      // 2. Prepend channel attribution AFTER prefix stripping
       if (forwardOrigin && (forwardOrigin as { type: string }).type === 'channel') {
         const channelName = (forwardOrigin as { chat?: { title?: string; username?: string } }).chat?.title
           ?? (forwardOrigin as { chat?: { title?: string; username?: string } }).chat?.username
           ?? 'Unknown Channel';
-        sourceTextOverride = `[Forwarded from ${channelName}]\n\n${fwdText}`;
+        // sourceTextOverride = attribution + stripped forwarded text (no tone prefix)
+        sourceTextOverride = `[Forwarded from ${channelName}]\n\n${fwdParsed.text}`;
       } else {
-        sourceTextOverride = fwdText;
+        sourceTextOverride = fwdParsed.text;
       }
     }
 
     const rawText = sourceTextOverride ?? ctx.message?.text;
     if (!rawText) return;
 
-    // 1b. Parse prefix — validate tone/shape override before anything else
-    const prefixResult = parsePrefix(rawText);
+    // 1b. Parse prefix — validate tone/shape override before anything else.
+    // For forwarded messages, prefix was already parsed from raw fwdText above;
+    // skip re-parsing to avoid attribution string shadowing the prefix.
+    const prefixResult = forwardedPrefixResult ?? parsePrefix(rawText);
     if ('error' in prefixResult) {
       await ctx.reply(prefixResult.error);
       return;
     }
 
     // prefixResult.text is the stripped text (prefix removed if found)
-    let sourceText = prefixResult.text;
+    // For forwarded messages, sourceTextOverride already contains the stripped text
+    // (with attribution prepended), so use sourceTextOverride if set.
+    let sourceText = sourceTextOverride ?? prefixResult.text;
     const tonePrefix = prefixResult.prefixFound ? prefixResult.tone : null;
     const shapePrefix = prefixResult.prefixFound ? prefixResult.shape : null;
 
@@ -137,8 +156,10 @@ export function createNarratorHandler(db: Database.Database) {
       if (detectedUrl !== null) {
         try {
           const fetchedContent = await validateAndFetchUrl(detectedUrl);
-          // Wrap in untrusted boundary to prevent prompt injection from web content
-          sourceText = `<untrusted_source>\n${fetchedContent}\n</untrusted_source>`;
+          // Wrap in untrusted boundary to prevent prompt injection from web content.
+          // Escape any closing tag inside the content to prevent early-close injection.
+          const escaped = fetchedContent.replace(/<\/untrusted_source>/gi, '<\\/untrusted_source>');
+          sourceText = `<untrusted_source>\n${escaped}\n</untrusted_source>`;
         } catch (err) {
           const msg = String(err);
           if (/private IP/i.test(msg) || /SSRF/i.test(msg)) {

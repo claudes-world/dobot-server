@@ -1,6 +1,7 @@
 import dns from 'node:dns/promises';
 import ipaddr from 'ipaddr.js';
 import { Agent as UndiciAgent } from 'undici';
+import he from 'he';
 
 const ALLOWED_CONTENT_TYPES = ["text/html", "text/markdown", "text/plain"];
 const MAX_REDIRECTS = 3;
@@ -37,6 +38,13 @@ function isPrivateAddress(address: string): boolean {
         const v4range = v4.range();
         if (BLOCKED.includes(v4range)) return true;
       }
+    }
+
+    // multicast and broadcast — ipaddr.js range() returns 'multicast' for 224-239,
+    // but 255.255.255.255 falls outside named ranges; catch both with byte check.
+    if (parsed.kind() === 'ipv4') {
+      const bytes = (parsed as ipaddr.IPv4).toByteArray();
+      if (bytes[0] >= 224) return true; // multicast (224-239) + broadcast (255.255.255.255)
     }
 
     return false;
@@ -112,32 +120,38 @@ export async function validateAndFetchUrl(urlString: string): Promise<string> {
         connect: { lookup: (_hostname: string, _opts: unknown, cb: (err: Error | null, address: string, family: number) => void) => cb(null, resolvedIp, 4) }
       });
 
-      response = await fetch(currentUrl, {
-        signal: controller.signal,
-        redirect: 'manual',
-        // @ts-expect-error — undici dispatcher is not in the standard fetch types but is supported by Node.js
-        dispatcher,
-      });
+      let isRedirect = false;
+      try {
+        response = await fetch(hopUrl.toString(), {
+          signal: controller.signal,
+          redirect: 'manual',
+          // @ts-expect-error — undici dispatcher is not in the standard fetch types but is supported by Node.js
+          dispatcher,
+        });
 
-      if (response.status >= 300 && response.status < 400) {
-        redirectCount++;
-        if (redirectCount > MAX_REDIRECTS) {
+        if (response.status >= 300 && response.status < 400) {
+          redirectCount++;
+          if (redirectCount > MAX_REDIRECTS) {
+            response.body?.cancel().catch(() => {});
+            throw new Error(`Too many redirects (max ${MAX_REDIRECTS})`);
+          }
+          const location = response.headers.get('location');
+          if (!location) throw new Error('Redirect with no Location header');
+          const nextUrl = new URL(location, currentUrl);
+          // Assert redirect target is also HTTPS
+          if (nextUrl.protocol !== 'https:') {
+            throw new Error(`Redirect to non-HTTPS URL: ${nextUrl.protocol}`);
+          }
+          currentUrl = nextUrl.toString();
+          // Drain/cancel the redirect response body to release the underlying connection
           response.body?.cancel().catch(() => {});
-          throw new Error(`Too many redirects (max ${MAX_REDIRECTS})`);
+          isRedirect = true;
         }
-        const location = response.headers.get('location');
-        if (!location) throw new Error('Redirect with no Location header');
-        const nextUrl = new URL(location, currentUrl);
-        // Assert redirect target is also HTTPS
-        if (nextUrl.protocol !== 'https:') {
-          throw new Error(`Redirect to non-HTTPS URL: ${nextUrl.protocol}`);
-        }
-        currentUrl = nextUrl.toString();
-        // Drain/cancel the redirect response body to release the underlying connection
-        response.body?.cancel().catch(() => {});
-        continue;
+      } finally {
+        dispatcher.destroy().catch(() => {});
       }
-      break;
+
+      if (!isRedirect) break;
     }
 
     // 3. Assert content-type
@@ -175,14 +189,7 @@ export async function validateAndFetchUrl(urlString: string): Promise<string> {
     // as &lt;script&gt; are not passed through as literal text after stripping.
     // Collapse runs of whitespace introduced by tag removal.
     if (ctBase === 'text/html') {
-      return raw
-        // Decode entities first (before tag stripping)
-        .replace(/&nbsp;/gi, ' ')
-        .replace(/&amp;/gi, '&')
-        .replace(/&lt;/gi, '<')
-        .replace(/&gt;/gi, '>')
-        .replace(/&quot;/gi, '"')
-        .replace(/&#39;/gi, "'")
+      return he.decode(raw)
         // Now strip tags (which may include newly-decoded ones)
         .replace(/<script[\s\S]*?<\/script>/gi, '')   // remove script blocks
         .replace(/<style[\s\S]*?<\/style>/gi, '')      // remove style blocks
