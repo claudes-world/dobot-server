@@ -43,9 +43,13 @@ function isoTimestampET(date: Date): string {
 async function downloadTelegramFile(bot: Bot, fileId: string, destPath: string, signal?: AbortSignal): Promise<void> {
   const file = await Promise.race([
     bot.api.getFile(fileId),
-    new Promise<never>((_, reject) =>
-      signal?.addEventListener('abort', () => reject(new Error('getFile timeout')))
-    ),
+    new Promise<never>((_, reject) => {
+      if (signal?.aborted) {
+        reject(new Error('getFile timeout'));
+        return;
+      }
+      signal?.addEventListener('abort', () => reject(new Error('getFile timeout')), { once: true });
+    }),
   ]);
   if (!file.file_path) {
     throw new Error(`Telegram returned no file_path for file_id ${fileId}`);
