@@ -65,14 +65,8 @@ function userFacingError(err: unknown): string {
 
 export function createNarratorHandler(db: Database.Database) {
   return async function narratorHandler(ctx: Context): Promise<void> {
-    // DM-only — silently reject group/supergroup/channel messages (#47)
-    if (ctx.chat?.type !== 'private') return;
-
     const userId = ctx.from?.id;
     if (!userId) return;
-
-    // 1. Filter — silently reject if not in allowlist
-    if (!config.narrator.allowedUserIds.has(userId)) return;
 
     // 1a. Forwarded message detection — check before plain text extraction
     // Note: forward_origin is the canonical forwarded-message indicator in Bot API 7.x+.
@@ -532,8 +526,6 @@ export function createCancelHandler(db: Database.Database) {
   return async function cancelHandler(ctx: Context): Promise<void> {
     const userId = ctx.from?.id;
     if (!userId) return;
-
-    if (!config.narrator.allowedUserIds.has(userId)) return;
 
     const chatId = ctx.chat!.id;
     const active = activeJobs.get(chatId);

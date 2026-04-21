@@ -1,5 +1,8 @@
 import './lib/otel.js';
 import 'dotenv/config';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { readFileSync } from 'node:fs';
 import { Bot } from 'grammy';
 import { config } from './config.js';
 import { createBot } from './bot-factory.js';
@@ -9,6 +12,17 @@ import { registerHandlers } from './router.js';
 import { createNarratorHandler, continueNarration, createCancelHandler } from './handlers/narrator.js';
 import { createLengthCallbackHandler } from './handlers/narrator-callback.js';
 import { createIdeaCaptureHandler } from './handlers/idea-capture.js';
+import { createGatewayMiddleware } from './gateway/middleware.js';
+import { dispatchMessage } from './gateway/dispatcher.js';
+import type { GatewayRule } from './gateway/types.js';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+function loadGatewayRules(agentDir: string): GatewayRule[] {
+  const gatewayPath = path.resolve(__dirname, '..', 'agents', agentDir, 'gateway.json');
+  const raw = readFileSync(gatewayPath, 'utf8');
+  return JSON.parse(raw) as GatewayRule[];
+}
 
 async function main(): Promise<void> {
   const db = openDatabase(config.dobotDbPath);
@@ -21,6 +35,10 @@ async function main(): Promise<void> {
   const me = await narratorBot.api.getMe();
   rebuildPendingTimeouts(db, narratorBot.api, me,
     (jobId, length, ctx, toneOverride, shapeOverride, ackMessageId) => continueNarration(jobId, length, ctx, db, toneOverride, shapeOverride, ackMessageId));
+
+  // Load narrator gateway rules and apply middleware
+  const narratorRules = loadGatewayRules('narrator');
+  narratorBot.use(createGatewayMiddleware(narratorRules, me.username));
 
   registerHandlers(narratorBot, {
     narrator: createNarratorHandler(db),
@@ -35,13 +53,21 @@ async function main(): Promise<void> {
   const ideaBotToken = config.telegramIdeaBotToken;
   if (ideaBotToken) {
     ideaBot = createBot(ideaBotToken);
-    ideaBot.on('message', createIdeaCaptureHandler(ideaBot));
+
+    // Load idea-capture gateway rules and apply middleware
+    const ideaRules = loadGatewayRules('idea-capture');
+    const ideaMe = await ideaBot.api.getMe();
+    ideaBot.use(createGatewayMiddleware(ideaRules, ideaMe.username));
+
+    const ideaCaptureHandler = createIdeaCaptureHandler(ideaBot);
+    ideaBot.on('message', async (ctx) => {
+      await dispatchMessage(ctx, {
+        'idea-capture': ideaCaptureHandler,
+      });
+    });
     ideaBot.catch((err) => {
       console.error('ideaBot: unhandled error in handler', err);
     });
-    if (config.ideaCapture.allowedUserIds.size === 0) {
-      console.warn('dobot-server: IDEA_ALLOWED_USER_IDS is not set — idea bot will reject all messages');
-    }
     console.log('dobot-server: idea capture bot enabled');
   } else {
     console.warn('dobot-server: TELEGRAM_IDEA_BOT_TOKEN not set — idea capture bot disabled');

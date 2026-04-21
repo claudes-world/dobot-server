@@ -6,7 +6,6 @@ vi.mock('../../src/config.js', () => ({
   config: {
     telegramNarratorBotToken: 'test-token',
     narrator: {
-      allowedUserIds: new Set([1]),
       agentRunScript: '/fake/run.sh',
       narratorRoot: '/fake/claudes-world/agents/narrator',
       classifyModel: 'claude-haiku-4-5',

@@ -1,11 +1,15 @@
-import { Context, InlineKeyboard, Bot } from 'grammy';
+import { Context, Bot } from 'grammy';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { execa } from 'execa';
 import { config } from '../config.js';
-import { toBase64url } from '../lib/telegram.js';
+
+export interface IdeaCaptureCTX {
+  repo: string;
+  folder: string;
+}
 
 /** Format the "from" field: "Display Name (@username)" or just "Display Name". */
 function formatFrom(ctx: Context): string {
@@ -13,6 +17,22 @@ function formatFrom(ctx: Context): string {
   if (!user) return 'unknown';
   const name = [user.first_name, user.last_name].filter(Boolean).join(' ');
   return user.username ? `${name} (@${user.username})` : name;
+}
+
+/** Format a filename-safe timestamp: YYYY-MM-DD-HH-MM-SS in Eastern Time. */
+function fileTimestampET(date: Date): string {
+  const fmt = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  });
+  const parts = Object.fromEntries(fmt.formatToParts(date).map(p => [p.type, p.value]));
+  return `${parts.year}-${parts.month}-${parts.day}-${parts.hour}-${parts.minute}-${parts.second}`;
 }
 
 /** Get ISO8601 timestamp in Eastern Time. */
@@ -28,7 +48,6 @@ function isoTimestampET(date: Date): string {
     hour12: false,
   });
   const parts = Object.fromEntries(fmt.formatToParts(date).map(p => [p.type, p.value]));
-  // Determine ET offset (EDT = -04:00, EST = -05:00)
   const tzFmt = new Intl.DateTimeFormat('en-US', {
     timeZone: 'America/New_York',
     timeZoneName: 'short',
@@ -63,52 +82,46 @@ async function downloadTelegramFile(bot: Bot, fileId: string, destPath: string, 
   await fs.writeFile(destPath, buf);
 }
 
-/** Append an idea entry to the idea file. */
-async function appendIdea(opts: {
+/** Write an idea to a per-file path under the ideas directory. */
+async function writeIdeaFile(opts: {
+  ideasDir: string;
+  timestamp: string;
   type: 'text' | 'voice' | 'photo';
   from: string;
-  timestamp: string;
+  isoTimestamp: string;
   body: string;
   photoPath?: string;
 }): Promise<void> {
-  const { type, from, timestamp, body, photoPath } = opts;
+  const { ideasDir, timestamp, type, from, isoTimestamp, body, photoPath } = opts;
+  await fs.mkdir(ideasDir, { recursive: true });
+  const uuid = randomUUID();
+  const filePath = path.join(ideasDir, `${timestamp}-${uuid}.md`);
   const photoLine = photoPath ? `![photo](${photoPath}) ` : '';
-  const entry = `---\n## ${type} idea — ${timestamp}\n**From:** ${from}\n\n${photoLine}${body}\n\n`;
-  await fs.appendFile(config.ideaCapture.ideaFile, entry, 'utf8');
-}
-
-/** Build the CPC t.me deep-link button for the idea file. */
-function buildIdeaKeyboard(): InlineKeyboard {
-  const deepLink = `https://t.me/claude_do_bot/pocket?startapp=${toBase64url(config.ideaCapture.ideaFile)}`;
-  return new InlineKeyboard().url('View in Pocket', deepLink);
+  const content = `---\n## ${type} idea — ${isoTimestamp}\n**From:** ${from}\n\n${photoLine}${body}\n`;
+  await fs.writeFile(filePath, content, 'utf8');
 }
 
 /**
  * Factory — returns a grammY message handler for idea capture.
- * Handles text, voice, and photo messages.
+ * Requires pre-gated ctx from the gateway middleware.
+ * gatewayCTX provides { repo, folder } routing context.
  */
 export function createIdeaCaptureHandler(bot: Bot) {
-  return async function ideaCaptureHandler(ctx: Context): Promise<void> {
-    // DM-only
-    if (ctx.chat?.type !== 'private') return;
-
-    const userId = ctx.from?.id;
-    if (!userId) return;
-
-    // Access guard — silently reject if not in allowlist
-    if (!config.ideaCapture.allowedUserIds.has(userId)) return;
+  return async function ideaCaptureHandler(ctx: Context, gatewayCTX: unknown): Promise<void> {
+    const { repo, folder } = gatewayCTX as IdeaCaptureCTX;
+    const ideasDir = path.join(repo, 'captured-ideas', folder);
 
     const from = formatFrom(ctx);
     const now = new Date();
-    const timestamp = isoTimestampET(now);
-    const keyboard = buildIdeaKeyboard();
+    const timestamp = fileTimestampET(now);
+    const isoTimestamp = isoTimestampET(now);
 
     // --- Text message ---
     const text = ctx.message?.text;
     if (text) {
       try {
-        await appendIdea({ type: 'text', from, timestamp, body: text });
-        await ctx.reply('✅ Idea saved', { reply_markup: keyboard });
+        await writeIdeaFile({ ideasDir, timestamp, type: 'text', from, isoTimestamp, body: text });
+        await ctx.reply('✅ Idea saved');
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         console.error('[idea-capture/text] Error:', msg);
@@ -140,8 +153,8 @@ export function createIdeaCaptureHandler(bot: Bot) {
           return;
         }
 
-        await appendIdea({ type: 'voice', from, timestamp, body: transcribed });
-        await ctx.reply('✅ Idea saved', { reply_markup: keyboard });
+        await writeIdeaFile({ ideasDir, timestamp, type: 'voice', from, isoTimestamp, body: transcribed });
+        await ctx.reply('✅ Idea saved');
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         console.error('[idea-capture/voice] Error:', msg);
@@ -155,7 +168,6 @@ export function createIdeaCaptureHandler(bot: Bot) {
     // --- Photo message ---
     const photos = ctx.message?.photo;
     if (photos && photos.length > 0) {
-      // Telegram sends photos sorted by size — take the largest
       const largest = photos[photos.length - 1];
       const permanentPath = path.join(config.ideaCapture.photosDir, `idea-photo-${randomUUID()}.jpg`);
       let recorded = false;
@@ -171,15 +183,13 @@ export function createIdeaCaptureHandler(bot: Bot) {
         }
 
         const caption = ctx.message?.caption ?? '';
-        const relPath = path.relative(path.dirname(config.ideaCapture.ideaFile), permanentPath);
-        await appendIdea({ type: 'photo', from, timestamp, body: caption, photoPath: relPath });
-        recorded = true;  // file is now referenced in the idea entry
-        await ctx.reply('✅ Idea saved', { reply_markup: keyboard });
+        await writeIdeaFile({ ideasDir, timestamp, type: 'photo', from, isoTimestamp, body: caption, photoPath: permanentPath });
+        recorded = true;
+        await ctx.reply('✅ Idea saved');
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         console.error('[idea-capture/photo] Error:', msg);
         if (!recorded) {
-          // Only clean up if the entry was never committed
           try { await fs.unlink(permanentPath); } catch { }
         }
         await ctx.reply('⚠️ Failed to save photo').catch(() => {});

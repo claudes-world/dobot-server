@@ -1,0 +1,61 @@
+import { Context } from 'grammy';
+import { GatewayRule } from './types.js';
+
+function matchScalarOrArray(value: number | undefined, condition: number | number[]): boolean {
+  if (value === undefined) return false;
+  return Array.isArray(condition) ? condition.includes(value) : value === condition;
+}
+
+function matchStringScalarOrArray(value: string | undefined, condition: string | string[]): boolean {
+  if (value === undefined) return false;
+  return Array.isArray(condition) ? condition.includes(value) : value === condition;
+}
+
+/**
+ * Test a single rule against the incoming ctx.
+ * All specified match fields must satisfy (AND logic).
+ * Returns true if all conditions pass.
+ */
+function testRule(ctx: Context, rule: GatewayRule, botUsername?: string): boolean {
+  const { match } = rule;
+
+  if (match.userId !== undefined) {
+    const userId = ctx.from?.id;
+    if (!matchScalarOrArray(userId, match.userId)) return false;
+  }
+
+  if (match.chatId !== undefined) {
+    const chatId = ctx.chat?.id;
+    if (!matchScalarOrArray(chatId, match.chatId)) return false;
+  }
+
+  if (match.threadId !== undefined) {
+    const threadId = ctx.message?.message_thread_id;
+    if (!matchScalarOrArray(threadId, match.threadId)) return false;
+  }
+
+  if (match.chatType !== undefined) {
+    const chatType = ctx.chat?.type;
+    if (!matchStringScalarOrArray(chatType, match.chatType)) return false;
+  }
+
+  if (match.requireMention) {
+    const text = ctx.message?.text ?? ctx.message?.caption ?? '';
+    if (!botUsername) return false;
+    const mention = `@${botUsername}`;
+    if (!text.includes(mention)) return false;
+  }
+
+  return true;
+}
+
+/**
+ * Find the first rule in rules[] that matches ctx.
+ * Returns the matched rule or null if none match.
+ */
+export function matchRule(ctx: Context, rules: GatewayRule[], botUsername?: string): GatewayRule | null {
+  for (const rule of rules) {
+    if (testRule(ctx, rule, botUsername)) return rule;
+  }
+  return null;
+}
