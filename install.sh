@@ -39,7 +39,7 @@ fi
 # If both poll the same bot tokens, getUpdates returns HTTP 409 and SQLite write
 # contention corrupts state — halt with a clear message so the operator stops the
 # legacy process first.
-LEGACY_PIDS=$(pgrep -f "node .*dist/index\.js" | grep -v "$$" || true)
+LEGACY_PIDS=$(pgrep -f "node .*dist/index\.js" || true)
 SYSTEMD_PID=$(systemctl --user show dobot-server.service -p MainPID --value 2>/dev/null || echo 0)
 
 if [ -n "$LEGACY_PIDS" ] && [ "$SYSTEMD_PID" != "0" ]; then
