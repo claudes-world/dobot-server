@@ -1,5 +1,6 @@
 import { NodeTracerProvider } from '@opentelemetry/sdk-trace-node';
 import { SimpleSpanProcessor, ConsoleSpanExporter } from '@opentelemetry/sdk-trace-base';
+import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-http';
 import { Resource } from '@opentelemetry/resources';
 import { ATTR_SERVICE_NAME } from '@opentelemetry/semantic-conventions';
 import { context, trace, Tracer, Span, SpanStatusCode } from '@opentelemetry/api';
@@ -10,7 +11,15 @@ const provider = new NodeTracerProvider({
   }),
 });
 
-provider.addSpanProcessor(new SimpleSpanProcessor(new ConsoleSpanExporter()));
+// OTLPTraceExporter silently drops spans when the collector is absent — no process crash.
+provider.addSpanProcessor(
+  new SimpleSpanProcessor(new OTLPTraceExporter({ url: 'http://localhost:4318/v1/traces' }))
+);
+
+if (process.env.NODE_ENV === 'development') {
+  provider.addSpanProcessor(new SimpleSpanProcessor(new ConsoleSpanExporter()));
+}
+
 provider.register();
 
 export function getTracer(name: string): Tracer {
