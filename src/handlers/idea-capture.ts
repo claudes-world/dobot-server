@@ -108,7 +108,17 @@ async function writeIdeaFile(opts: {
  */
 export function createIdeaCaptureHandler(bot: Bot) {
   return async function ideaCaptureHandler(ctx: Context, gatewayCTX: unknown): Promise<void> {
-    const { repo, folder } = gatewayCTX as IdeaCaptureCTX;
+    const gc = (gatewayCTX && typeof gatewayCTX === 'object')
+      ? (gatewayCTX as Partial<IdeaCaptureCTX>)
+      : undefined;
+    if (!gc || !gc.repo || !gc.folder) {
+      console.warn(
+        `[idea-capture] invoked without valid context — expected {repo, folder}, ` +
+        `got ${JSON.stringify(gc)}. Dropping message.`,
+      );
+      return;
+    }
+    const { repo, folder } = gc;
     const ideasDir = path.join(repo, 'captured-ideas', folder);
 
     const from = formatFrom(ctx);

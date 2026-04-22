@@ -30,7 +30,9 @@ function testRule(ctx: Context, rule: GatewayRule, botUsername?: string): boolea
   }
 
   if (match.threadId !== undefined) {
-    const threadId = ctx.message?.message_thread_id;
+    // ctx.msg normalises across update types (message, edited_message, callback_query, etc.)
+    // ctx.message is undefined on callback_query/edited_message — do NOT use it here.
+    const threadId = ctx.msg?.message_thread_id;
     if (!matchScalarOrArray(threadId, match.threadId)) return false;
   }
 

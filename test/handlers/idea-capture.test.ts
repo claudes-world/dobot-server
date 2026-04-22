@@ -133,6 +133,77 @@ describe('ideaCaptureHandler — text messages', () => {
   });
 });
 
+describe('ideaCaptureHandler — gatewayCTX guard', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockFetch();
+  });
+
+  it('8. Drops message (no write, no reply) when gatewayCTX is undefined', async () => {
+    const { default: fsMock } = await import('node:fs/promises');
+    const writeFileSpy = vi.mocked(fsMock.writeFile);
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const bot = makeBot();
+    const ctx = makeCtx();
+    const handler = createIdeaCaptureHandler(bot as never);
+    await handler(ctx as never, undefined);
+
+    expect(writeFileSpy).not.toHaveBeenCalled();
+    expect(ctx.reply).not.toHaveBeenCalled();
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringMatching(/without valid context/));
+    warnSpy.mockRestore();
+  });
+
+  it('9. Drops message when gatewayCTX is missing repo', async () => {
+    const { default: fsMock } = await import('node:fs/promises');
+    const writeFileSpy = vi.mocked(fsMock.writeFile);
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const bot = makeBot();
+    const ctx = makeCtx();
+    const handler = createIdeaCaptureHandler(bot as never);
+    await handler(ctx as never, { folder: 'liam-dm' });
+
+    expect(writeFileSpy).not.toHaveBeenCalled();
+    expect(ctx.reply).not.toHaveBeenCalled();
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringMatching(/without valid context/));
+    warnSpy.mockRestore();
+  });
+
+  it('10. Drops message when gatewayCTX is missing folder', async () => {
+    const { default: fsMock } = await import('node:fs/promises');
+    const writeFileSpy = vi.mocked(fsMock.writeFile);
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const bot = makeBot();
+    const ctx = makeCtx();
+    const handler = createIdeaCaptureHandler(bot as never);
+    await handler(ctx as never, { repo: '/some/repo' });
+
+    expect(writeFileSpy).not.toHaveBeenCalled();
+    expect(ctx.reply).not.toHaveBeenCalled();
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringMatching(/without valid context/));
+    warnSpy.mockRestore();
+  });
+
+  it('11. Drops message when gatewayCTX is a non-object (string)', async () => {
+    const { default: fsMock } = await import('node:fs/promises');
+    const writeFileSpy = vi.mocked(fsMock.writeFile);
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const bot = makeBot();
+    const ctx = makeCtx();
+    const handler = createIdeaCaptureHandler(bot as never);
+    await handler(ctx as never, 'not-an-object' as never);
+
+    expect(writeFileSpy).not.toHaveBeenCalled();
+    expect(ctx.reply).not.toHaveBeenCalled();
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringMatching(/without valid context/));
+    warnSpy.mockRestore();
+  });
+});
+
 describe('ideaCaptureHandler — voice messages', () => {
   beforeEach(() => {
     vi.clearAllMocks();

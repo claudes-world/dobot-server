@@ -10,15 +10,19 @@ function makeCtx(overrides: {
   threadId?: number;
   text?: string;
 } = {}): Context {
+  const msgFields = {
+    ...(overrides.threadId !== undefined ? { message_thread_id: overrides.threadId } : {}),
+    ...(overrides.text !== undefined ? { text: overrides.text } : {}),
+  };
+  // Populate both ctx.message and ctx.msg (grammY alias) so threadId tests work
+  // regardless of update type. In production grammY populates ctx.msg automatically.
   return {
     from: overrides.userId !== undefined ? { id: overrides.userId } : undefined,
     chat: overrides.chatId !== undefined
       ? { id: overrides.chatId, type: overrides.chatType ?? 'private' }
       : undefined,
-    message: {
-      ...(overrides.threadId !== undefined ? { message_thread_id: overrides.threadId } : {}),
-      ...(overrides.text !== undefined ? { text: overrides.text } : {}),
-    },
+    message: msgFields,
+    msg: msgFields,
   } as unknown as Context;
 }
 
@@ -140,6 +144,51 @@ describe('matchRule — first-wins ordering', () => {
 
   it('empty rules array returns null', () => {
     expect(matchRule(makeCtx({ chatId: 1 }), [])).toBeNull();
+  });
+});
+
+describe('matchRule — threadId via ctx.msg across update types', () => {
+  it('matches threadId on callback_query (ctx.message is undefined, ctx.msg is set)', () => {
+    const rules: GatewayRule[] = [
+      { handler: 'specific', match: { chatId: -100, threadId: 5 } },
+      { handler: 'fallback', match: { chatId: -100 } },
+    ];
+    // Simulate callback_query: ctx.message is undefined, ctx.msg has message_thread_id
+    const ctx = {
+      from: { id: 1 },
+      chat: { id: -100, type: 'supergroup' },
+      message: undefined,
+      msg: { message_thread_id: 5 },
+    } as unknown as Context;
+    expect(matchRule(ctx, rules)?.handler).toBe('specific');
+  });
+
+  it('matches threadId on edited_message (ctx.message is undefined, ctx.msg is set)', () => {
+    const rules: GatewayRule[] = [
+      { handler: 'specific', match: { chatId: -100, threadId: 5 } },
+      { handler: 'fallback', match: { chatId: -100 } },
+    ];
+    const ctx = {
+      from: { id: 1 },
+      chat: { id: -100, type: 'supergroup' },
+      message: undefined,
+      msg: { message_thread_id: 5 },
+    } as unknown as Context;
+    expect(matchRule(ctx, rules)?.handler).toBe('specific');
+  });
+
+  it('falls through to fallback rule when callback_query is in a different thread', () => {
+    const rules: GatewayRule[] = [
+      { handler: 'specific', match: { chatId: -100, threadId: 5 } },
+      { handler: 'fallback', match: { chatId: -100 } },
+    ];
+    const ctx = {
+      from: { id: 1 },
+      chat: { id: -100, type: 'supergroup' },
+      message: undefined,
+      msg: { message_thread_id: 99 },
+    } as unknown as Context;
+    expect(matchRule(ctx, rules)?.handler).toBe('fallback');
   });
 });
 

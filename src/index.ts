@@ -15,13 +15,16 @@ import { createIdeaCaptureHandler } from './handlers/idea-capture.js';
 import { createGatewayMiddleware } from './gateway/middleware.js';
 import { dispatchMessage } from './gateway/dispatcher.js';
 import type { GatewayRule } from './gateway/types.js';
+import { validateGatewayRules } from './gateway/validate.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 function loadGatewayRules(agentDir: string): GatewayRule[] {
   const gatewayPath = path.resolve(__dirname, '..', 'agents', agentDir, 'gateway.json');
   const raw = readFileSync(gatewayPath, 'utf8');
-  return JSON.parse(raw) as GatewayRule[];
+  const rules = JSON.parse(raw) as GatewayRule[];
+  validateGatewayRules(rules, agentDir);
+  return rules;
 }
 
 async function main(): Promise<void> {
