@@ -115,12 +115,14 @@ async function main(): Promise<void> {
   process.once('SIGINT', () => { shutdown().catch(console.error); });
   process.once('SIGTERM', () => { shutdown().catch(console.error); });
 
-  // Signal systemd ready + start watchdog heartbeat AFTER bots are confirmed polling.
+  // Signal systemd ready + start watchdog heartbeat only after ALL bots are confirmed polling.
   // grammy's onStart fires when long-polling has successfully entered the update loop.
-  let readySignalled = false;
+  // Use a countdown so READY= is sent only when every configured bot is live.
+  const botCount = ideaBot ? 2 : 1;
+  let botsStarted = 0;
   const onBotStart = () => {
-    if (!readySignalled) {
-      readySignalled = true;
+    botsStarted++;
+    if (botsStarted === botCount) {
       sdNotify.ready();
       sdNotify.startWatchdogMode(15_000);
       console.log('dobot-server: sd_notify READY sent');
@@ -131,7 +133,7 @@ async function main(): Promise<void> {
   try {
     await Promise.all([
       narratorBot.start({ onStart: onBotStart }),
-      ...(ideaBot ? [ideaBot.start()] : []),
+      ...(ideaBot ? [ideaBot.start({ onStart: onBotStart })] : []),
     ]);
   } catch (err) {
     console.error('Bot startup failed — shutting down', err);
