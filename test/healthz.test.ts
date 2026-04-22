@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import http from 'node:http';
 import { createRequire } from 'node:module';
-import { createHealthServer } from '../src/index.js';
+import { createHealthServer } from '../src/health.js';
 
 // Helper: make an HTTP GET request and return { statusCode, body }
 function get(server: http.Server, path: string): Promise<{ statusCode: number; body: string }> {

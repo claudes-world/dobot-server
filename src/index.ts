@@ -1,6 +1,5 @@
 import './lib/otel.js';
 import 'dotenv/config';
-import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readFileSync } from 'node:fs';
@@ -18,12 +17,12 @@ import { createGatewayMiddleware } from './gateway/middleware.js';
 import { dispatchMessage } from './gateway/dispatcher.js';
 import type { GatewayRule } from './gateway/types.js';
 import { validateGatewayRules } from './gateway/validate.js';
+import { createHealthServer } from './health.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // sd-notify is a CJS module with a native binding — load via createRequire
 const _require = createRequire(import.meta.url);
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 const sdNotify = _require('sd-notify') as {
   ready: () => void;
   watchdog: () => void;
@@ -32,21 +31,6 @@ const sdNotify = _require('sd-notify') as {
 };
 
 const HEALTH_PORT = 38801;
-
-/** Tiny health endpoint — no deps beyond Node built-ins. */
-export function createHealthServer(): http.Server {
-  const startTime = Date.now();
-  return http.createServer((req, res) => {
-    if (req.method === 'GET' && req.url === '/healthz') {
-      const body = JSON.stringify({ status: 'ok', uptime: Math.floor((Date.now() - startTime) / 1000) });
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(body);
-    } else {
-      res.writeHead(404);
-      res.end();
-    }
-  });
-}
 
 function loadGatewayRules(agentDir: string): GatewayRule[] {
   const gatewayPath = path.resolve(__dirname, '..', 'agents', agentDir, 'gateway.json');
@@ -121,7 +105,7 @@ async function main(): Promise<void> {
     if (shutdownPromise) return shutdownPromise;
     shutdownPromise = (async () => {
       sdNotify.stopWatchdogMode();
-      healthServer.close();
+      await new Promise<void>((resolve) => healthServer.close(() => resolve()));
       await narratorBot.stop();
       if (ideaBot) await ideaBot.stop();
       db.close();
@@ -131,13 +115,24 @@ async function main(): Promise<void> {
   process.once('SIGINT', () => { shutdown().catch(console.error); });
   process.once('SIGTERM', () => { shutdown().catch(console.error); });
 
-  // Signal systemd that we are ready, then start watchdog heartbeat
-  sdNotify.ready();
-  sdNotify.startWatchdogMode(15_000);
+  // Signal systemd ready + start watchdog heartbeat AFTER bots are confirmed polling.
+  // grammy's onStart fires when long-polling has successfully entered the update loop.
+  let readySignalled = false;
+  const onBotStart = () => {
+    if (!readySignalled) {
+      readySignalled = true;
+      sdNotify.ready();
+      sdNotify.startWatchdogMode(15_000);
+      console.log('dobot-server: sd_notify READY sent');
+    }
+  };
 
   console.log('dobot-server listening...');
   try {
-    await Promise.all([narratorBot.start(), ...(ideaBot ? [ideaBot.start()] : [])]);
+    await Promise.all([
+      narratorBot.start({ onStart: onBotStart }),
+      ...(ideaBot ? [ideaBot.start()] : []),
+    ]);
   } catch (err) {
     console.error('Bot startup failed — shutting down', err);
     await shutdown();
