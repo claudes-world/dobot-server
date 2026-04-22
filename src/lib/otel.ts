@@ -1,15 +1,19 @@
+import fs from 'node:fs/promises';
 import { NodeTracerProvider } from '@opentelemetry/sdk-trace-node';
 import { SimpleSpanProcessor, ConsoleSpanExporter } from '@opentelemetry/sdk-trace-base';
 import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-http';
+import { MeterProvider, PeriodicExportingMetricReader } from '@opentelemetry/sdk-metrics';
+import { OTLPMetricExporter } from '@opentelemetry/exporter-metrics-otlp-http';
 import { Resource } from '@opentelemetry/resources';
 import { ATTR_SERVICE_NAME } from '@opentelemetry/semantic-conventions';
-import { context, trace, Tracer, Span, SpanStatusCode } from '@opentelemetry/api';
+import { context, trace, metrics, Tracer, Span, SpanStatusCode, Meter, ObservableResult } from '@opentelemetry/api';
 
-const provider = new NodeTracerProvider({
-  resource: new Resource({
-    [ATTR_SERVICE_NAME]: 'dobot-server',
-  }),
+const resource = new Resource({
+  [ATTR_SERVICE_NAME]: 'dobot-server',
 });
+
+// ── Traces ────────────────────────────────────────────────────────────────────
+const provider = new NodeTracerProvider({ resource });
 
 // OTLPTraceExporter silently drops spans when the collector is absent — no process crash.
 provider.addSpanProcessor(
@@ -22,8 +26,47 @@ if (process.env.NODE_ENV === 'development') {
 
 provider.register();
 
+// ── Metrics ───────────────────────────────────────────────────────────────────
+// OTLPMetricExporter silently drops metrics when the collector is absent — no process crash.
+const meterProvider = new MeterProvider({
+  resource,
+  readers: [
+    new PeriodicExportingMetricReader({
+      exporter: new OTLPMetricExporter({ url: 'http://localhost:4318/v1/metrics' }),
+      exportIntervalMillis: 60_000,
+    }),
+  ],
+});
+
+metrics.setGlobalMeterProvider(meterProvider);
+
 export function getTracer(name: string): Tracer {
   return trace.getTracer(name);
+}
+
+export function getMeter(name: string): Meter {
+  return metrics.getMeter(name);
+}
+
+/**
+ * Register an ObservableGauge that reports the SQLite DB file size in bytes.
+ * Called once from index.ts after the db path is resolved.
+ * Silent no-op if stat fails (file not yet created or permission error).
+ */
+export function registerDbSizeGauge(dbPath: string): void {
+  const m = getMeter('db');
+  const gauge = m.createObservableGauge('db_size_bytes', {
+    description: 'SQLite database file size in bytes',
+    unit: 'bytes',
+  });
+  gauge.addCallback(async (result: ObservableResult) => {
+    try {
+      const stat = await fs.stat(dbPath);
+      result.observe(stat.size);
+    } catch {
+      // File absent or unreadable — skip observation (no-op is safe)
+    }
+  });
 }
 
 // Convenience wrapper — every span must be paired with span.end()

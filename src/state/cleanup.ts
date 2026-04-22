@@ -3,7 +3,7 @@ import type { UserFromGetMe, Update } from 'grammy/types';
 import Database from 'better-sqlite3';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { pendingTimeouts } from '../handlers/narrator.js';
+import { pendingTimeouts, pendingNarratorTimeouts } from '../handlers/narrator.js';
 
 interface PendingRow {
   job_id: string;
@@ -90,6 +90,7 @@ export function rebuildPendingTimeouts(
         const still = db.prepare(`DELETE FROM pending_length_choices WHERE job_id = ? RETURNING *`).get(row.job_id) as
           | { tone_prefix: string | null; shape_prefix: string | null } | undefined;
         pendingTimeouts.delete(row.job_id);
+        pendingNarratorTimeouts.add(-1, { bot: 'narrator' });
         if (!still) return; // already handled by callback
 
         const { job_id: jobId, chat_id: chatId, keyboard_msg_id: ackMessageId } = row;
@@ -132,6 +133,7 @@ export function rebuildPendingTimeouts(
     }, delay);
 
     pendingTimeouts.set(row.job_id, handle);
+    pendingNarratorTimeouts.add(1, { bot: 'narrator' });
     console.log(`startup: rebuilt timeout for pending choice ${row.job_id} (fires in ${Math.round(delay / 1000)}s)`);
   }
 }

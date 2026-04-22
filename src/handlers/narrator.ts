@@ -4,7 +4,12 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { config } from '../config.js';
-import { getTracer, withSpan } from '../lib/otel.js';
+import { getTracer, getMeter, withSpan } from '../lib/otel.js';
+
+const meter = getMeter('narrator');
+export const pendingNarratorTimeouts = meter.createUpDownCounter('pending_narrator_timeouts', {
+  description: 'Number of pending narrator length-choice timeouts',
+});
 import { deliverNarration } from '../delivery/narrator.js';
 import { buildSubprocessEnv, spawnClaudeWithRetry, ClaudeEnvelope } from '../lib/claude-subprocess.js';
 import { checkAndRecordRate } from '../lib/rate-limit.js';
@@ -237,6 +242,7 @@ export function createNarratorHandler(db: Database.Database) {
           const still = db.prepare(`DELETE FROM pending_length_choices WHERE job_id = ? RETURNING *`).get(jobId) as
             | { tone_prefix: string | null; shape_prefix: string | null } | undefined;
           pendingTimeouts.delete(jobId); // Always clean up map entry (MEDIUM-1: prevent leak on early return)
+          pendingNarratorTimeouts.add(-1, { bot: 'narrator' });
           if (!still) return; // already handled by callback
           if (ackMessageId) {
             try {
@@ -250,6 +256,7 @@ export function createNarratorHandler(db: Database.Database) {
       }, config.narrator.lengthTimeoutMs);
 
       pendingTimeouts.set(jobId, timeoutHandle);
+      pendingNarratorTimeouts.add(1, { bot: 'narrator' });
     } catch (setupErr) {
       // Clean up orphaned job and temp file
       if (sourceTmpFile) { try { await fs.unlink(sourceTmpFile); } catch { /* already gone */ } }
@@ -279,6 +286,7 @@ export async function continueNarration(
   if (existingTimeout !== undefined) {
     clearTimeout(existingTimeout);
     pendingTimeouts.delete(jobId);
+    pendingNarratorTimeouts.add(-1, { bot: 'narrator' });
   }
 
   const userId = ctx.from?.id;
@@ -559,6 +567,7 @@ export function createCancelHandler(db: Database.Database) {
       if (handle !== undefined) {
         clearTimeout(handle);
         pendingTimeouts.delete(pending.job_id);
+        pendingNarratorTimeouts.add(-1, { bot: 'narrator' });
       }
       try {
         db.prepare(

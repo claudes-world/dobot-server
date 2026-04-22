@@ -1,4 +1,4 @@
-import './lib/otel.js';
+import { registerDbSizeGauge } from './lib/otel.js';
 import 'dotenv/config';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -42,6 +42,7 @@ function loadGatewayRules(agentDir: string): GatewayRule[] {
 
 async function main(): Promise<void> {
   const db = openDatabase(config.dobotDbPath);
+  registerDbSizeGauge(config.dobotDbPath);
   await startupSweep(db);
 
   const narratorBot = createBot(config.telegramNarratorBotToken);

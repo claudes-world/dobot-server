@@ -1,5 +1,13 @@
 import { Bot, Context } from 'grammy';
-import { getTracer } from './lib/otel.js';
+import { getTracer, getMeter } from './lib/otel.js';
+
+const meter = getMeter('router');
+const messagesReceived = meter.createCounter('messages_received', {
+  description: 'Total incoming message events per bot',
+});
+const handlerErrors = meter.createCounter('handler_errors', {
+  description: 'Total handler errors per bot and handler',
+});
 
 type Handler = (ctx: Context) => Promise<void>;
 
@@ -7,7 +15,7 @@ export function registerHandlers(bot: Bot, handlers: {
   narrator: Handler;
   narratorCallback: Handler;
   cancel: Handler;
-}): void {
+}, botName = 'narrator'): void {
   // bots using registerHandlers ignore edited_message — see issue #73
   bot.on('edited_message', async (ctx) => {
     try {
@@ -29,6 +37,7 @@ export function registerHandlers(bot: Bot, handlers: {
       console.error('cancel handler threw', err);
       span.recordException(err as Error);
       span.setStatus({ code: 2 /* ERROR */ });
+      handlerErrors.add(1, { bot: botName, handler: 'cancel' });
     } finally {
       span.end();
     }
@@ -36,6 +45,7 @@ export function registerHandlers(bot: Bot, handlers: {
 
   // Handler crash boundary: every handler wrapped in try/catch
   bot.on('message', async (ctx) => {
+    messagesReceived.add(1, { bot: botName });
     const tracer = getTracer('narrator');
     const span = tracer.startSpan('handler.narrator.message');
     try {
@@ -44,6 +54,7 @@ export function registerHandlers(bot: Bot, handlers: {
       console.error('narrator handler threw', err);
       span.recordException(err as Error);
       span.setStatus({ code: 2 /* ERROR */ });
+      handlerErrors.add(1, { bot: botName, handler: 'narrator' });
       // Do NOT re-throw — propagation would kill the bot loop
     } finally {
       span.end();
@@ -59,6 +70,7 @@ export function registerHandlers(bot: Bot, handlers: {
       console.error('narrator callback handler threw', err);
       span.recordException(err as Error);
       span.setStatus({ code: 2 /* ERROR */ });
+      handlerErrors.add(1, { bot: botName, handler: 'narratorCallback' });
       // Do NOT re-throw — propagation would kill the bot loop
     } finally {
       span.end();
