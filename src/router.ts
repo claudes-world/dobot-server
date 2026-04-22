@@ -8,6 +8,17 @@ export function registerHandlers(bot: Bot, handlers: {
   narratorCallback: Handler;
   cancel: Handler;
 }): void {
+  // bots using registerHandlers ignore edited_message — see issue #73
+  bot.on('edited_message', async (ctx) => {
+    try {
+      const msgId = ctx.editedMessage?.message_id;
+      console.debug(`[router] edited_message ignored (id: ${msgId})`);
+    } catch (err) {
+      console.error('edited_message handler threw', err);
+      // Do NOT re-throw — propagation would kill the bot loop
+    }
+  });
+
   // /cancel command — registered before generic message handler so it fires first
   bot.command('cancel', async (ctx) => {
     const tracer = getTracer('narrator');
