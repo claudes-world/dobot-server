@@ -3,17 +3,37 @@ import { matchRule } from '../../src/gateway/match.js';
 import type { GatewayRule } from '../../src/gateway/types.js';
 import type { Context } from 'grammy';
 
+// Auto-generate Telegram-style `mention` entities for every `@handle` token in
+// the given text. Production Telegram attaches these for any well-formed
+// @username in a message body; reproducing that behaviour here keeps tests
+// realistic and mirrors how the matcher consumes `ctx.msg.entities`.
+function autoMentionEntities(text: string): Array<{ type: string; offset: number; length: number }> {
+  const entities: Array<{ type: string; offset: number; length: number }> = [];
+  const re = /@[A-Za-z0-9_]+/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    entities.push({ type: 'mention', offset: m.index, length: m[0].length });
+  }
+  return entities;
+}
+
 function makeCtx(overrides: {
   userId?: number;
   chatId?: number;
   chatType?: string;
   threadId?: number;
   text?: string;
+  entities?: Array<{ type: string; offset: number; length: number }>;
 } = {}): Context {
-  const msgFields = {
+  const msgFields: Record<string, unknown> = {
     ...(overrides.threadId !== undefined ? { message_thread_id: overrides.threadId } : {}),
     ...(overrides.text !== undefined ? { text: overrides.text } : {}),
   };
+  if (overrides.text !== undefined) {
+    msgFields.entities = overrides.entities ?? autoMentionEntities(overrides.text);
+  } else if (overrides.entities !== undefined) {
+    msgFields.entities = overrides.entities;
+  }
   // Populate both ctx.message and ctx.msg (grammY alias) so threadId tests work
   // regardless of update type. In production grammY populates ctx.msg automatically.
   return {
@@ -119,6 +139,49 @@ describe('matchRule — requireMention', () => {
     ];
     const ctx = makeCtx({ chatId: 1, chatType: 'group', text: 'hey @mybot do this' });
     expect(matchRule(ctx, rules)).toBeNull();
+  });
+
+  it('matches exact-boundary @botUsername via entities', () => {
+    const rules: GatewayRule[] = [
+      { handler: 'h', match: { requireMention: true } },
+    ];
+    const ctx = makeCtx({
+      chatId: 1,
+      chatType: 'group',
+      text: 'hey @claude_do_bot help',
+    });
+    expect(matchRule(ctx, rules, 'claude_do_bot')).toBeTruthy();
+  });
+
+  it('no match on substring bypass @botUsername_evil (entities guard)', () => {
+    // Without entity-based matching this would have passed a naive
+    // text.includes("@claude_do_bot") check. The mention entity covers the
+    // full "@claude_do_bot_evil" span, so strict length-equality rejects it.
+    const rules: GatewayRule[] = [
+      { handler: 'h', match: { requireMention: true } },
+    ];
+    const ctx = makeCtx({
+      chatId: 1,
+      chatType: 'group',
+      text: 'hey @claude_do_bot_evil help',
+    });
+    expect(matchRule(ctx, rules, 'claude_do_bot')).toBeNull();
+  });
+
+  it('no match when @botUsername appears only as plain text (no mention entity)', () => {
+    // If Telegram didn't tag the token as a mention entity (e.g. inside a
+    // code block), requireMention should still reject it — exact-boundary
+    // semantics require an entity.
+    const rules: GatewayRule[] = [
+      { handler: 'h', match: { requireMention: true } },
+    ];
+    const ctx = makeCtx({
+      chatId: 1,
+      chatType: 'group',
+      text: 'hey @claude_do_bot help',
+      entities: [],
+    });
+    expect(matchRule(ctx, rules, 'claude_do_bot')).toBeNull();
   });
 });
 

@@ -31,7 +31,7 @@
   },
   {
     "handler": "idea-capture",
-    "match": { "userId": 1676859445 },
+    "match": { "userId": 1676859445, "chatType": "private" },
     "context": { "repo": "/home/claude/claudes-world", "folder": "liam-dm" },
     "label": "DMs from Liam"
   }

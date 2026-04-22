@@ -42,10 +42,18 @@ function testRule(ctx: Context, rule: GatewayRule, botUsername?: string): boolea
   }
 
   if (match.requireMention) {
-    const text = ctx.message?.text ?? ctx.message?.caption ?? '';
     if (!botUsername) return false;
-    const mention = `@${botUsername}`;
-    if (!text.includes(mention)) return false;
+    // Use Telegram mention entities for exact-boundary match. This prevents
+    // substring bypass where "@botUsername_evil" would satisfy a naive
+    // text.includes("@botUsername") check. Entities give exact offset+length
+    // bounds that Telegram itself assigns when rendering the mention.
+    const text = ctx.msg?.text ?? ctx.msg?.caption ?? '';
+    const entities = ctx.msg?.entities ?? ctx.msg?.caption_entities ?? [];
+    const mentionTag = `@${botUsername}`;
+    const mentioned = entities.some(
+      (e) => e.type === 'mention' && text.slice(e.offset, e.offset + e.length) === mentionTag,
+    );
+    if (!mentioned) return false;
   }
 
   return true;
