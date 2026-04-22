@@ -19,16 +19,9 @@ export const config = {
   telegramIdeaBotToken: process.env['TELEGRAM_IDEA_BOT_TOKEN'],
   dobotDbPath: optional('DOBOT_DB_PATH', '/home/claude/.local/share/dobot-server/state.db'),
   ideaCapture: {
-    allowedUserIds: new Set(
-      optional('IDEA_ALLOWED_USER_IDS', '').split(',').filter(Boolean).map(Number)
-    ),
-    ideaFile: optional('IDEA_FILE', '/home/claude/ideas.md'),
     photosDir: path.resolve(process.env['IDEA_PHOTOS_DIR'] ?? path.join(os.homedir(), 'ideas-photos')),
   },
   narrator: {
-    allowedUserIds: new Set(
-      optional('NARRATOR_ALLOWED_USER_IDS', '').split(',').filter(Boolean).map(Number)
-    ),
     agentRunScript: optional('NARRATOR_AGENT_RUN_SCRIPT', '/home/claude/claudes-world/agents/narrator/run.sh'),
     narratorRoot: optional('NARRATOR_ROOT', path.resolve(__dirname, '..', 'agents', 'narrator')),
     classifyModel: optional('NARRATOR_CLASSIFY_MODEL', 'claude-haiku-4-5'),

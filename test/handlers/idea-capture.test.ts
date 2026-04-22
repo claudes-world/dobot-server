@@ -6,12 +6,9 @@ vi.mock('../../src/config.js', () => ({
     telegramNarratorBotToken: 'test-narrator-token',
     telegramIdeaBotToken: 'test-idea-token',
     ideaCapture: {
-      allowedUserIds: new Set([1]),
-      ideaFile: '/tmp/test-ideas.md',
       photosDir: '/tmp/ideas-photos',
     },
     narrator: {
-      allowedUserIds: new Set([1]),
       agentRunScript: '/fake/run.sh',
       narratorRoot: '/fake/claudes-world/agents/narrator',
       classifyModel: 'claude-haiku-4-5',
@@ -47,6 +44,8 @@ vi.mock('execa', () => ({
 
 import { execa } from 'execa';
 import { createIdeaCaptureHandler } from '../../src/handlers/idea-capture.js';
+
+const TEST_GATEWAY_CTX = { repo: '/home/claude/claudes-world', folder: 'liam-dm' };
 
 function makeBot(overrides: Record<string, unknown> = {}) {
   return {
@@ -85,18 +84,22 @@ describe('ideaCaptureHandler — text messages', () => {
     mockFetch();
   });
 
-  it('1. Text message saved — appendFile called with idea content', async () => {
+  it('1. Text message saved — writeFile called with idea content', async () => {
     const { default: fsMock } = await import('node:fs/promises');
-    const appendSpy = vi.mocked(fsMock.appendFile);
+    const writeFileSpy = vi.mocked(fsMock.writeFile);
 
     const bot = makeBot();
     const ctx = makeCtx();
     const handler = createIdeaCaptureHandler(bot as never);
-    await handler(ctx as never);
+    await handler(ctx as never, TEST_GATEWAY_CTX);
 
-    expect(appendSpy).toHaveBeenCalledOnce();
-    const [filePath, content] = appendSpy.mock.calls[0] as [string, string];
-    expect(filePath).toBe('/tmp/test-ideas.md');
+    // writeFile called for the idea markdown file
+    const ideaWrite = writeFileSpy.mock.calls.find(([p]) =>
+      typeof p === 'string' && p.includes('captured-ideas')
+    );
+    expect(ideaWrite).toBeDefined();
+    const [filePath, content] = ideaWrite as [string, string];
+    expect(filePath).toMatch(/captured-ideas\/liam-dm\/\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}-[0-9a-f-]+\.md$/);
     expect(content).toContain('This is my idea text');
     expect(content).toContain('text idea');
     expect(content).toContain('Liam (@liamtest)');
@@ -106,39 +109,98 @@ describe('ideaCaptureHandler — text messages', () => {
     const bot = makeBot();
     const ctx = makeCtx();
     const handler = createIdeaCaptureHandler(bot as never);
-    await handler(ctx as never);
+    await handler(ctx as never, TEST_GATEWAY_CTX);
 
     expect(ctx.reply).toHaveBeenCalledOnce();
-    expect(ctx.reply).toHaveBeenCalledWith(
-      '✅ Idea saved',
-      expect.objectContaining({ reply_markup: expect.anything() })
+    expect(ctx.reply).toHaveBeenCalledWith('✅ Idea saved');
+  });
+
+  it('3. Idea file path uses gatewayCTX repo and folder', async () => {
+    const { default: fsMock } = await import('node:fs/promises');
+    const writeFileSpy = vi.mocked(fsMock.writeFile);
+
+    const bot = makeBot();
+    const ctx = makeCtx();
+    const handler = createIdeaCaptureHandler(bot as never);
+    await handler(ctx as never, { repo: '/some/repo', folder: 'custom-folder' });
+
+    const ideaWrite = writeFileSpy.mock.calls.find(([p]) =>
+      typeof p === 'string' && p.includes('captured-ideas')
     );
+    expect(ideaWrite).toBeDefined();
+    const [filePath] = ideaWrite as [string];
+    expect(filePath).toContain('/some/repo/captured-ideas/custom-folder/');
+  });
+});
+
+describe('ideaCaptureHandler — gatewayCTX guard', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockFetch();
   });
 
-  it('3. Unknown user rejected — no appendFile, no reply', async () => {
+  it('8. Drops message (no write, no reply) when gatewayCTX is undefined', async () => {
     const { default: fsMock } = await import('node:fs/promises');
-    const appendSpy = vi.mocked(fsMock.appendFile);
+    const writeFileSpy = vi.mocked(fsMock.writeFile);
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
     const bot = makeBot();
-    const ctx = makeCtx({ from: { id: 999, first_name: 'Stranger' } });
+    const ctx = makeCtx();
     const handler = createIdeaCaptureHandler(bot as never);
-    await handler(ctx as never);
+    await handler(ctx as never, undefined);
 
-    expect(appendSpy).not.toHaveBeenCalled();
+    expect(writeFileSpy).not.toHaveBeenCalled();
     expect(ctx.reply).not.toHaveBeenCalled();
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringMatching(/without valid context/));
+    warnSpy.mockRestore();
   });
 
-  it('4. Group message rejected — DM-only filter', async () => {
+  it('9. Drops message when gatewayCTX is missing repo', async () => {
     const { default: fsMock } = await import('node:fs/promises');
-    const appendSpy = vi.mocked(fsMock.appendFile);
+    const writeFileSpy = vi.mocked(fsMock.writeFile);
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
     const bot = makeBot();
-    const ctx = makeCtx({ chat: { id: -100, type: 'supergroup' } });
+    const ctx = makeCtx();
     const handler = createIdeaCaptureHandler(bot as never);
-    await handler(ctx as never);
+    await handler(ctx as never, { folder: 'liam-dm' });
 
-    expect(appendSpy).not.toHaveBeenCalled();
+    expect(writeFileSpy).not.toHaveBeenCalled();
     expect(ctx.reply).not.toHaveBeenCalled();
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringMatching(/without valid context/));
+    warnSpy.mockRestore();
+  });
+
+  it('10. Drops message when gatewayCTX is missing folder', async () => {
+    const { default: fsMock } = await import('node:fs/promises');
+    const writeFileSpy = vi.mocked(fsMock.writeFile);
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const bot = makeBot();
+    const ctx = makeCtx();
+    const handler = createIdeaCaptureHandler(bot as never);
+    await handler(ctx as never, { repo: '/some/repo' });
+
+    expect(writeFileSpy).not.toHaveBeenCalled();
+    expect(ctx.reply).not.toHaveBeenCalled();
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringMatching(/without valid context/));
+    warnSpy.mockRestore();
+  });
+
+  it('11. Drops message when gatewayCTX is a non-object (string)', async () => {
+    const { default: fsMock } = await import('node:fs/promises');
+    const writeFileSpy = vi.mocked(fsMock.writeFile);
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const bot = makeBot();
+    const ctx = makeCtx();
+    const handler = createIdeaCaptureHandler(bot as never);
+    await handler(ctx as never, 'not-an-object' as never);
+
+    expect(writeFileSpy).not.toHaveBeenCalled();
+    expect(ctx.reply).not.toHaveBeenCalled();
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringMatching(/without valid context/));
+    warnSpy.mockRestore();
   });
 });
 
@@ -148,9 +210,9 @@ describe('ideaCaptureHandler — voice messages', () => {
     mockFetch();
   });
 
-  it('5. Voice message transcribed and saved', async () => {
+  it('4. Voice message transcribed and saved', async () => {
     const { default: fsMock } = await import('node:fs/promises');
-    const appendSpy = vi.mocked(fsMock.appendFile);
+    const writeFileSpy = vi.mocked(fsMock.writeFile);
     const execaMock = vi.mocked(execa);
 
     const bot = makeBot();
@@ -162,7 +224,7 @@ describe('ideaCaptureHandler — voice messages', () => {
     });
 
     const handler = createIdeaCaptureHandler(bot as never);
-    await handler(ctx as never);
+    await handler(ctx as never, TEST_GATEWAY_CTX);
 
     // execa called with transcribe binary and a temp path
     expect(execaMock).toHaveBeenCalledOnce();
@@ -170,20 +232,20 @@ describe('ideaCaptureHandler — voice messages', () => {
     expect(bin).toBe('/home/claude/bin/transcribe');
     expect(args[0]).toMatch(/idea-voice-[0-9a-f-]+\.oga$/);
 
-    // appendFile called with transcribed content
-    expect(appendSpy).toHaveBeenCalledOnce();
-    const [, content] = appendSpy.mock.calls[0] as [string, string];
+    // writeFile called with transcribed content for the idea file
+    const ideaWrite = writeFileSpy.mock.calls.find(([p]) =>
+      typeof p === 'string' && p.includes('captured-ideas')
+    );
+    expect(ideaWrite).toBeDefined();
+    const [, content] = ideaWrite as [string, string];
     expect(content).toContain('transcribed text from voice note');
     expect(content).toContain('voice idea');
 
     // Reply sent
-    expect(ctx.reply).toHaveBeenCalledWith(
-      '✅ Idea saved',
-      expect.objectContaining({ reply_markup: expect.anything() })
-    );
+    expect(ctx.reply).toHaveBeenCalledWith('✅ Idea saved');
   });
 
-  it('6. Voice temp file cleaned up after transcription', async () => {
+  it('5. Voice temp file cleaned up after transcription', async () => {
     const { default: fsMock } = await import('node:fs/promises');
     const unlinkSpy = vi.mocked(fsMock.unlink);
 
@@ -196,7 +258,7 @@ describe('ideaCaptureHandler — voice messages', () => {
     });
 
     const handler = createIdeaCaptureHandler(bot as never);
-    await handler(ctx as never);
+    await handler(ctx as never, TEST_GATEWAY_CTX);
 
     expect(unlinkSpy).toHaveBeenCalledOnce();
     const unlinkedPath = unlinkSpy.mock.calls[0][0] as string;
@@ -210,7 +272,7 @@ describe('ideaCaptureHandler — photo messages', () => {
     mockFetch();
   });
 
-  it('7. Photo saved to permanent path (no temp file)', async () => {
+  it('6. Photo saved to permanent path (no temp file unlinked on success)', async () => {
     const { default: fsMock } = await import('node:fs/promises');
     const writeFileSpy = vi.mocked(fsMock.writeFile);
     const unlinkSpy = vi.mocked(fsMock.unlink);
@@ -228,20 +290,27 @@ describe('ideaCaptureHandler — photo messages', () => {
     });
 
     const handler = createIdeaCaptureHandler(bot as never);
-    await handler(ctx as never);
+    await handler(ctx as never, TEST_GATEWAY_CTX);
 
-    // Photo written directly to permanent path — no unlink
+    // Photo written directly to permanent path — no unlink on success
     expect(unlinkSpy).not.toHaveBeenCalled();
-    const writtenPath = writeFileSpy.mock.calls[0][0] as string;
+    const photoWrite = writeFileSpy.mock.calls.find(([p]) =>
+      typeof p === 'string' && p.includes('idea-photo')
+    );
+    expect(photoWrite).toBeDefined();
+    const [writtenPath] = photoWrite as [string];
     expect(writtenPath).toMatch(/\/tmp\/ideas-photos\/idea-photo-[0-9a-f-]+\.jpg$/);
   });
 
-  it('8. Photo error reply sent and orphan cleaned up when appendFile fails', async () => {
+  it('7. Photo error reply sent and orphan cleaned up when writeFile (idea) fails', async () => {
     const { default: fsMock } = await import('node:fs/promises');
-    const appendSpy = vi.mocked(fsMock.appendFile);
+    const writeFileSpy = vi.mocked(fsMock.writeFile);
     const unlinkSpy = vi.mocked(fsMock.unlink);
 
-    appendSpy.mockRejectedValueOnce(new Error('disk full'));
+    // First writeFile (photo download) succeeds, second (idea file) fails
+    writeFileSpy
+      .mockResolvedValueOnce(undefined)   // photo download
+      .mockRejectedValueOnce(new Error('disk full'));  // idea file write
 
     const bot = makeBot();
     const ctx = makeCtx({
@@ -252,7 +321,7 @@ describe('ideaCaptureHandler — photo messages', () => {
     });
 
     const handler = createIdeaCaptureHandler(bot as never);
-    await handler(ctx as never);
+    await handler(ctx as never, TEST_GATEWAY_CTX);
 
     // Orphaned permanent photo file should be cleaned up on error
     expect(unlinkSpy).toHaveBeenCalledOnce();

@@ -1,0 +1,7 @@
+[
+  {
+    "handler": "narrator",
+    "match": { "chatType": "private", "userId": [1676859445, 7757261871] },
+    "label": "Narrator — DM from allowed users"
+  }
+]
