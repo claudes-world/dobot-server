@@ -34,22 +34,55 @@ if ! test -e "/var/lib/systemd/linger/${USER}"; then
     exit 1
 fi
 
-# Detect legacy nohup/unmanaged `node dist/index.js` process running outside systemd
-# (historical deployment was `nohup node dist/index.js >> /tmp/dobot-server.log`).
-# If both poll the same bot tokens, getUpdates returns HTTP 409 and SQLite write
-# contention corrupts state — halt with a clear message so the operator stops the
-# legacy process first.
-LEGACY_PIDS=$(pgrep -f "node .*dist/index\.js" || true)
+# Detect legacy nohup/unmanaged dobot-server process — any `node dist/index.js`
+# started outside systemd whose cwd is ~/code/dobot-server and whose exe is a
+# real node binary. Empirically narrow (R2 regex `node .*dist/index\.js` was too
+# permissive — matched CPC backends like `node apps/server/dist/index.js`, bash
+# wrappers whose argv contained the literal string, and Claude subagent prompts):
+#   1. Anchored argv: literal `node dist/index.js` (no `.*`) so longer paths miss
+#   2. /proc/PID/cwd == ~/code/dobot-server  (wrong-checkout guard)
+#   3. /proc/PID/exe resolves to a node binary (not a bash wrapper whose argv
+#      happens to contain the string)
+CANONICAL_DIR="$HOME/code/dobot-server"
 SYSTEMD_PID=$(systemctl --user show dobot-server.service -p MainPID --value 2>/dev/null || echo 0)
 
-if [ -n "$LEGACY_PIDS" ] && [ "$SYSTEMD_PID" != "0" ]; then
-    LEGACY_PIDS=$(echo "$LEGACY_PIDS" | grep -v "^${SYSTEMD_PID}$" || true)
-fi
+# pgrep -f is needed because node's comm is just `node` — argv holds the path.
+# Escape the dot so it's a literal (pgrep -f is ERE). The narrow pattern (no `.*`)
+# prevents matching `node apps/server/dist/index.js` or other alternate paths.
+CANDIDATE_PIDS=$(pgrep -af "node dist/index\.js" | awk '{print $1}' || true)
+
+LEGACY_PIDS=""
+for pid in $CANDIDATE_PIDS; do
+    # Skip systemd's own MainPID (we're checking for UNMANAGED duplicates)
+    if [ "$pid" = "$SYSTEMD_PID" ]; then
+        continue
+    fi
+    # Must be running from the canonical checkout
+    if [ ! -r "/proc/$pid/cwd" ]; then
+        continue
+    fi
+    CWD=$(readlink -f "/proc/$pid/cwd" 2>/dev/null || echo "")
+    if [ "$CWD" != "$CANONICAL_DIR" ]; then
+        continue
+    fi
+    # Must be an actual node binary — excludes bash wrappers whose argv contains
+    # the literal string `node dist/index.js` (e.g. Claude subagent shells, nohup
+    # invocation wrappers under PID 1).
+    EXE=$(readlink -f "/proc/$pid/exe" 2>/dev/null || echo "")
+    case "$EXE" in
+        */node|*/node[0-9]*|*/nodejs)
+            LEGACY_PIDS="$LEGACY_PIDS $pid"
+            ;;
+    esac
+done
+LEGACY_PIDS=$(echo "$LEGACY_PIDS" | xargs)  # trim whitespace
 
 if [ -n "$LEGACY_PIDS" ]; then
-    echo "ERROR: Found existing unmanaged node dist/index.js process(es): $LEGACY_PIDS" >&2
-    echo "       Bot tokens would collide on getUpdates (HTTP 409) + duplicate message delivery." >&2
-    echo "       Stop the legacy process first: kill -TERM <PID>" >&2
+    echo "ERROR: Found legacy unmanaged dobot-server node process(es) outside systemd:" >&2
+    echo "       PIDs: $LEGACY_PIDS" >&2
+    echo "       Each has CWD=$CANONICAL_DIR and exe=node, running dist/index.js." >&2
+    echo "       Bot tokens would collide on getUpdates (HTTP 409) + duplicate delivery." >&2
+    echo "       Stop the legacy process(es) first: kill -TERM $LEGACY_PIDS" >&2
     echo "       Then re-run ./install.sh" >&2
     exit 1
 fi
