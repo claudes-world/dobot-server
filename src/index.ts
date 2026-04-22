@@ -1,8 +1,10 @@
 import './lib/otel.js';
 import 'dotenv/config';
+import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { Bot } from 'grammy';
 import { config } from './config.js';
 import { createBot } from './bot-factory.js';
@@ -18,6 +20,33 @@ import type { GatewayRule } from './gateway/types.js';
 import { validateGatewayRules } from './gateway/validate.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+// sd-notify is a CJS module with a native binding — load via createRequire
+const _require = createRequire(import.meta.url);
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const sdNotify = _require('sd-notify') as {
+  ready: () => void;
+  watchdog: () => void;
+  startWatchdogMode: (intervalMs: number) => void;
+  stopWatchdogMode: () => void;
+};
+
+const HEALTH_PORT = 38801;
+
+/** Tiny health endpoint — no deps beyond Node built-ins. */
+export function createHealthServer(): http.Server {
+  const startTime = Date.now();
+  return http.createServer((req, res) => {
+    if (req.method === 'GET' && req.url === '/healthz') {
+      const body = JSON.stringify({ status: 'ok', uptime: Math.floor((Date.now() - startTime) / 1000) });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(body);
+    } else {
+      res.writeHead(404);
+      res.end();
+    }
+  });
+}
 
 function loadGatewayRules(agentDir: string): GatewayRule[] {
   const gatewayPath = path.resolve(__dirname, '..', 'agents', agentDir, 'gateway.json');
@@ -76,6 +105,14 @@ async function main(): Promise<void> {
     console.warn('dobot-server: TELEGRAM_IDEA_BOT_TOKEN not set — idea capture bot disabled');
   }
 
+  // Start health HTTP server
+  const healthServer = createHealthServer();
+  await new Promise<void>((resolve, reject) => {
+    healthServer.listen(HEALTH_PORT, '127.0.0.1', resolve);
+    healthServer.once('error', reject);
+  });
+  console.log(`dobot-server: health endpoint listening on 127.0.0.1:${HEALTH_PORT}`);
+
   // Graceful shutdown — idempotent guard ensures concurrent SIGINT+SIGTERM
   // (e.g. double Ctrl+C) only runs stop/close once.
   let shutdownPromise: Promise<void> | null = null;
@@ -83,6 +120,8 @@ async function main(): Promise<void> {
   const shutdown = (): Promise<void> => {
     if (shutdownPromise) return shutdownPromise;
     shutdownPromise = (async () => {
+      sdNotify.stopWatchdogMode();
+      healthServer.close();
       await narratorBot.stop();
       if (ideaBot) await ideaBot.stop();
       db.close();
@@ -91,6 +130,10 @@ async function main(): Promise<void> {
   };
   process.once('SIGINT', () => { shutdown().catch(console.error); });
   process.once('SIGTERM', () => { shutdown().catch(console.error); });
+
+  // Signal systemd that we are ready, then start watchdog heartbeat
+  sdNotify.ready();
+  sdNotify.startWatchdogMode(15_000);
 
   console.log('dobot-server listening...');
   try {
