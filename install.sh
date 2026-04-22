@@ -34,6 +34,26 @@ if ! test -e "/var/lib/systemd/linger/${USER}"; then
     exit 1
 fi
 
+# Detect legacy nohup/unmanaged `node dist/index.js` process running outside systemd
+# (historical deployment was `nohup node dist/index.js >> /tmp/dobot-server.log`).
+# If both poll the same bot tokens, getUpdates returns HTTP 409 and SQLite write
+# contention corrupts state — halt with a clear message so the operator stops the
+# legacy process first.
+LEGACY_PIDS=$(pgrep -f "node .*dist/index\.js" | grep -v "$$" || true)
+SYSTEMD_PID=$(systemctl --user show dobot-server.service -p MainPID --value 2>/dev/null || echo 0)
+
+if [ -n "$LEGACY_PIDS" ] && [ "$SYSTEMD_PID" != "0" ]; then
+    LEGACY_PIDS=$(echo "$LEGACY_PIDS" | grep -v "^${SYSTEMD_PID}$" || true)
+fi
+
+if [ -n "$LEGACY_PIDS" ]; then
+    echo "ERROR: Found existing unmanaged node dist/index.js process(es): $LEGACY_PIDS" >&2
+    echo "       Bot tokens would collide on getUpdates (HTTP 409) + duplicate message delivery." >&2
+    echo "       Stop the legacy process first: kill -TERM <PID>" >&2
+    echo "       Then re-run ./install.sh" >&2
+    exit 1
+fi
+
 if [ ! -x /usr/bin/node ]; then
     echo "ERROR: /usr/bin/node not found or not executable." >&2
     echo "The systemd unit hardcodes /usr/bin/node — install Node via the system package manager." >&2
@@ -44,6 +64,20 @@ if [ ! -e "$ENV_FILE" ]; then
     echo "ERROR: $ENV_FILE not found." >&2
     echo "Create it with TELEGRAM_NARRATOR_BOT_TOKEN and (optionally) TELEGRAM_IDEA_BOT_TOKEN." >&2
     echo "See .env.example for the full variable list." >&2
+    exit 1
+fi
+
+# Enforce secrets-file hygiene: 0600 perms (auto-tighten) + owner must match $USER.
+# Ownership drift is a red flag (cross-user contamination or root-owned file), mode
+# drift is a common config goof that's safe to auto-fix.
+PERMS=$(stat --format='%a' "$ENV_FILE")
+if [ "$PERMS" != "600" ]; then
+    echo "WARN: $ENV_FILE has permissions $PERMS (expected 600) — tightening to 0600" >&2
+    chmod 600 "$ENV_FILE"
+fi
+OWNER=$(stat --format='%U' "$ENV_FILE")
+if [ "$OWNER" != "$USER" ]; then
+    echo "ERROR: $ENV_FILE owned by '$OWNER' not '$USER' — refusing to use" >&2
     exit 1
 fi
 
