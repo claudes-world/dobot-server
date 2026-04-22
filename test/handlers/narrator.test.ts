@@ -29,6 +29,11 @@ vi.mock('../../src/lib/claude-subprocess.js', () => ({
 
 vi.mock('../../src/lib/otel.js', () => ({
   getTracer: () => ({}),
+  getMeter: () => ({
+    createUpDownCounter: vi.fn().mockReturnValue({ add: vi.fn() }),
+    createCounter: vi.fn().mockReturnValue({ add: vi.fn() }),
+    createObservableGauge: vi.fn().mockReturnValue({ addCallback: vi.fn() }),
+  }),
   withSpan: vi.fn().mockImplementation(
     async (_tracer: unknown, _name: unknown, _attrs: unknown, fn: (span: unknown) => unknown) =>
       fn({ setAttribute: vi.fn() })

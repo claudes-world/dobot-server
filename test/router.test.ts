@@ -77,9 +77,13 @@ describe('router crash boundary', () => {
     };
     const mockTracer = { startSpan: vi.fn().mockReturnValue(mockSpan) };
 
+    const mockCounter = { add: vi.fn() };
+    const mockMeter = { createCounter: vi.fn().mockReturnValue(mockCounter) };
+
     // Use doMock (not hoisted vi.mock) so we can set up inline
     vi.doMock('../src/lib/otel.js', () => ({
       getTracer: () => mockTracer,
+      getMeter: () => mockMeter,
     }));
 
     // Re-import router with the mock active
