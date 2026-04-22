@@ -1,0 +1,20 @@
+[Unit]
+Description=dobot-server — shared Telegram bot runtime
+Documentation=https://github.com/claudes-world/dobot-server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=NODE_ENV=production
+EnvironmentFile=%h/.secrets/dobot-server.env
+WorkingDirectory=%h/code/dobot-server
+ExecStart=/usr/bin/node dist/index.js
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=dobot-server
+
+[Install]
+WantedBy=default.target
