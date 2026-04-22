@@ -5,7 +5,8 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=simple
+Type=notify
+WatchdogSec=30
 Environment=NODE_ENV=production
 EnvironmentFile=%h/.secrets/dobot-server.env
 WorkingDirectory=%h/code/dobot-server
