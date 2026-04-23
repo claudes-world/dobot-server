@@ -3,6 +3,8 @@ Description=dobot-server — shared Telegram bot runtime
 Documentation=https://github.com/claudes-world/dobot-server
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=120
+StartLimitBurst=5
 
 [Service]
 Type=notify
@@ -11,6 +13,7 @@ Environment=NODE_ENV=production
 EnvironmentFile=%h/.secrets/dobot-server.env
 WorkingDirectory=%h/code/dobot-server
 ExecStart=/usr/bin/node dist/index.js
+ExecStartPost=%h/code/toolbox/lib/systemd-wait-port.sh 38801
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal
