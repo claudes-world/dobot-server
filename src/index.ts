@@ -11,7 +11,7 @@ import { openDatabase } from './state/db.js';
 import { startupSweep, rebuildPendingTimeouts } from './state/cleanup.js';
 import { registerHandlers } from './router.js';
 import { createNarratorHandler, continueNarration, createCancelHandler } from './handlers/narrator.js';
-import { createLengthCallbackHandler } from './handlers/narrator-callback.js';
+import { createLengthCallbackHandler, createRetryAudioCallbackHandler } from './handlers/narrator-callback.js';
 import { createIdeaCaptureHandler } from './handlers/idea-capture.js';
 import { createGatewayMiddleware } from './gateway/middleware.js';
 import { dispatchMessage } from './gateway/dispatcher.js';
@@ -57,11 +57,20 @@ async function main(): Promise<void> {
   const narratorRules = loadGatewayRules('narrator');
   narratorBot.use(createGatewayMiddleware(narratorRules, me.username));
 
+  const lengthCallbackHandler = createLengthCallbackHandler(db, (jobId, length, ctx, toneOverride, shapeOverride, ackMessageId) =>
+    continueNarration(jobId, length, ctx, db, toneOverride, shapeOverride, ackMessageId)
+  );
+  const retryAudioCallbackHandler = createRetryAudioCallbackHandler(db);
+
   registerHandlers(narratorBot, {
     narrator: createNarratorHandler(db),
-    narratorCallback: createLengthCallbackHandler(db, (jobId, length, ctx, toneOverride, shapeOverride, ackMessageId) =>
-      continueNarration(jobId, length, ctx, db, toneOverride, shapeOverride, ackMessageId)
-    ),
+    narratorCallback: async (ctx) => {
+      const data = ctx.callbackQuery?.data ?? '';
+      if (data.startsWith('retry_audio:')) {
+        return retryAudioCallbackHandler(ctx);
+      }
+      return lengthCallbackHandler(ctx);
+    },
     cancel: createCancelHandler(db),
   });
 

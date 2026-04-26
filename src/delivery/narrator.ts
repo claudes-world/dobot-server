@@ -9,6 +9,67 @@ import { buildSubprocessEnv } from '../lib/claude-subprocess.js';
 import { recordSpend } from '../lib/rate-limit.js';
 import { toBase64url } from '../lib/telegram.js';
 
+type TtsFailReason = 'timeout' | 'gcp' | 'f3_silent' | 'generic';
+
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function buildTtsErrorMessage(reason: TtsFailReason, timeoutSecs: number, stderr: string): string {
+  switch (reason) {
+    case 'timeout':
+      return `✅ Narrative generated\n❌ Audio timed out — generation exceeded ${timeoutSecs}s and was cancelled.\n\nThe narrative may be unusually long. Try requesting a shorter version, or use the text below.`;
+    case 'gcp': {
+      const base = '✅ Narrative generated\n❌ Audio unavailable — TTS service error (authentication or quota issue).\n\nThis is a server-side problem, not your text. Retry in a few minutes or notify the operator.';
+      return stderr ? `${base}\n<blockquote expandable>${escapeHtml(stderr)}</blockquote>` : base;
+    }
+    case 'f3_silent':
+      return '✅ Narrative generated\n❌ Audio failed — TTS ran but produced no output file (possible ffmpeg or disk issue).\n\nText version below. Operator: check ffmpeg availability and disk space.';
+    default:
+      return '✅ Narrative generated\n❌ Audio failed — unexpected error during TTS generation.\n\nText version below. Check server logs for details.';
+  }
+}
+
+async function sendAudio(
+  mp3Path: string,
+  caption: string,
+  keyboard: InlineKeyboard,
+  deepLink: string,
+  ctx: Context,
+): Promise<void> {
+  const mp3Stat = await fs.stat(mp3Path);
+  const mp3Size = mp3Stat.size;
+  const hasKeyboard = { reply_markup: keyboard };
+
+  if (mp3Size < 1_000_000) {
+    await ctx.replyWithVoice(new InputFile(mp3Path), { caption, ...hasKeyboard });
+  } else if (mp3Size <= 50_000_000) {
+    await ctx.replyWithAudio(new InputFile(mp3Path), { caption, ...hasKeyboard });
+  } else {
+    try {
+      const pubResult = await execa('publish-shared', ['--tmp', 'private', mp3Path], {
+        extendEnv: false,
+        env: buildSubprocessEnv(process.env, {
+          ...(process.env['GOOGLE_APPLICATION_CREDENTIALS'] ? { GOOGLE_APPLICATION_CREDENTIALS: process.env['GOOGLE_APPLICATION_CREDENTIALS']! } : {}),
+          ...(process.env['GOOGLE_CLOUD_PROJECT'] ? { GOOGLE_CLOUD_PROJECT: process.env['GOOGLE_CLOUD_PROJECT']! } : {}),
+          ...(process.env['SHARED_PRIVATE_BASE_URL'] ? { SHARED_PRIVATE_BASE_URL: process.env['SHARED_PRIVATE_BASE_URL']! } : {}),
+        }),
+        timeout: 60000,
+      });
+      const urlLine2 = pubResult.stdout.split('\n').find(l => l.startsWith('URL: '));
+      const shareUrl = urlLine2 ? urlLine2.replace(/^URL:\s*/, '').trim() : '';
+      if (!shareUrl) throw new Error('publish-shared did not output a URL line');
+      const urlKeyboard = new InlineKeyboard()
+        .url('Download audio', shareUrl).row()
+        .url('Read in Pocket Console', deepLink);
+      await ctx.reply(caption, { reply_markup: urlKeyboard });
+    } catch (pubErr) {
+      console.error('narrator: publish-shared failed:', pubErr);
+      await ctx.reply(`${caption}\n\n(Audio too large to send directly — ${Math.round(mp3Size / 1_000_000)}MB)`, { reply_markup: keyboard });
+    }
+  }
+}
+
 export interface DeliveryOptions {
   jobId: string;
   userId: number;
@@ -62,6 +123,8 @@ export async function deliverNarration(opts: DeliveryOptions): Promise<void> {
   let ttsChars = 0;
   let ttsDurationMs = 0;
   let audioGenerated = false;
+  let ttsFailReason: TtsFailReason = 'generic';
+  let ttsStderr = '';
 
   const mdSpeakStart = Date.now();
   try {
@@ -85,69 +148,48 @@ export async function deliverNarration(opts: DeliveryOptions): Promise<void> {
       await fs.access(mp3Path);
       audioGenerated = true;
       ttsChars = finalNarrative.length;
-    } catch { /* mp3 not created */ }
+    } catch (f3Err) {
+      console.warn('narrator: mp3 not produced', { mp3Path, err: f3Err });
+      ttsFailReason = 'f3_silent';
+    }
   } catch (err) {
     console.error('narrator: md-speak failed:', err);
+    const e = err as Record<string, unknown>;
+    if (e.timedOut === true) {
+      ttsFailReason = 'timeout';
+    } else if (!/aborted|cancel/i.test(String(e.message ?? ''))) {
+      const stderr = String(e.stderr ?? e.message ?? '');
+      ttsStderr = stderr.slice(0, 3800);
+      if (/google\.auth|credentials|PERMISSION_DENIED|quota|RESOURCE_EXHAUSTED/i.test(stderr)) {
+        ttsFailReason = 'gcp';
+      }
+    }
   }
 
   // 4. Build inline keyboard
   const keyboard = new InlineKeyboard();
   keyboard.url('Read in Pocket Console', deepLink);
 
-  // 5. Build caption
-  const truncatedWarning = stopReason === 'max_tokens' ? ' ⚠️ truncated (max_tokens — 12k cap)' : '';
-  const caption = `tone: ${tone} | shape: ${shape} | tts_chars: ${ttsChars}${truncatedWarning}`;
-
-  // 6. Deliver audio or markdown-only fallback
+  // 5. Deliver audio or markdown-only fallback
   if (audioGenerated) {
-    const mp3Stat = await fs.stat(mp3Path);
-    const mp3Size = mp3Stat.size;
-    const hasKeyboard = { reply_markup: keyboard };
+    const truncatedWarning = stopReason === 'max_tokens' ? ' ⚠️ truncated (max_tokens — 12k cap)' : '';
+    const caption = `tone: ${tone} | shape: ${shape} | tts_chars: ${ttsChars}${truncatedWarning}`;
+    await sendAudio(mp3Path, caption, keyboard, deepLink, ctx);
 
-    if (mp3Size < 1_000_000) {
-      // < 1MB: send as voice note
-      await ctx.replyWithVoice(new InputFile(mp3Path), { caption, ...hasKeyboard });
-    } else if (mp3Size <= 50_000_000) {
-      // 1-50MB: send as audio
-      await ctx.replyWithAudio(new InputFile(mp3Path), { caption, ...hasKeyboard });
-    } else {
-      // > 50MB: publish to VPS share
-      try {
-        const pubResult = await execa('publish-shared', ['--tmp', 'private', mp3Path], {
-          extendEnv: false,
-          env: buildSubprocessEnv(process.env, {
-            ...(process.env['GOOGLE_APPLICATION_CREDENTIALS'] ? { GOOGLE_APPLICATION_CREDENTIALS: process.env['GOOGLE_APPLICATION_CREDENTIALS']! } : {}),
-            ...(process.env['GOOGLE_CLOUD_PROJECT'] ? { GOOGLE_CLOUD_PROJECT: process.env['GOOGLE_CLOUD_PROJECT']! } : {}),
-            ...(process.env['SHARED_PRIVATE_BASE_URL'] ? { SHARED_PRIVATE_BASE_URL: process.env['SHARED_PRIVATE_BASE_URL']! } : {}),
-          }),
-          timeout: 60000,
-        });
-        // publish-shared outputs multi-line stdout; extract the URL: line
-        const urlLine2 = pubResult.stdout.split('\n').find(l => l.startsWith('URL: '));
-        const shareUrl = urlLine2 ? urlLine2.replace(/^URL:\s*/, '').trim() : '';
-        if (!shareUrl) {
-          throw new Error('publish-shared did not output a URL line');
-        }
-        const urlKeyboard = new InlineKeyboard()
-          .url('Download audio', shareUrl).row()
-          .url('Read in Pocket Console', deepLink);
-        await ctx.reply(caption, { reply_markup: urlKeyboard });
-      } catch (pubErr) {
-        console.error('narrator: publish-shared failed:', pubErr);
-        await ctx.reply(`${caption}\n\n(Audio too large to send directly — ${Math.round(mp3Size / 1_000_000)}MB)`, { reply_markup: keyboard });
-      }
-    }
-
-    // Audio delivered — edit ack to show completion
     if (ackMessageId) {
       try {
         await ctx.api.editMessageText(ctx.chat!.id, ackMessageId, '✅ Narration complete');
       } catch { /* swallow — ack message may have been deleted */ }
     }
   } else {
-    // No audio — send narrative link with partial-success message
-    const partialMsg = `✅ Narrative generated\n❌ Audio failed — text too long for TTS or service error\n\nRead via the button below.`;
-    await ctx.reply(partialMsg, { reply_markup: keyboard });
+    const timeoutSecs = Math.round(config.narrator.mdSpeakTimeout / 1000);
+    const partialMsg = buildTtsErrorMessage(ttsFailReason, timeoutSecs, ttsStderr);
+    const retryKeyboard = new InlineKeyboard()
+      .text('Retry audio', `retry_audio:${jobId}`)
+      .url('View text', deepLink);
+    const replyOpts: Parameters<typeof ctx.reply>[1] = { reply_markup: retryKeyboard };
+    if (ttsFailReason === 'gcp' && ttsStderr) (replyOpts as Record<string, unknown>)['parse_mode'] = 'HTML';
+    await ctx.reply(partialMsg, replyOpts);
 
     // Edit ack to reflect partial success
     if (ackMessageId) {
@@ -186,5 +228,88 @@ export async function deliverNarration(opts: DeliveryOptions): Promise<void> {
     }
   } catch (dbErr) {
     console.error('narrator: DB update failed after delivery:', dbErr);
+  }
+}
+
+export async function retryAudio(
+  jobId: string,
+  userId: number,
+  mdPath: string,
+  tone: string,
+  shape: string,
+  stopReason: string,
+  ctx: Context,
+  db: Database.Database,
+): Promise<void> {
+  const mp3Path = mdPath.replace(/\.md$/, '.mp3');
+  const deepLink = `https://t.me/claude_do_bot/pocket?startapp=${toBase64url(mdPath)}`;
+
+  let finalNarrative = '';
+  try {
+    finalNarrative = await fs.readFile(mdPath, 'utf8');
+  } catch {
+    const kb = new InlineKeyboard().url('View text', deepLink);
+    await ctx.reply('❌ Cannot retry — narrative file missing from disk.', { reply_markup: kb }).catch(() => {});
+    return;
+  }
+
+  let ttsFailReason: TtsFailReason = 'generic';
+  let ttsStderr = '';
+  let audioGenerated = false;
+  let ttsChars = 0;
+
+  try {
+    await execa('md-speak', ['--no-describe', mdPath], {
+      extendEnv: false,
+      env: buildSubprocessEnv(process.env, {
+        ...(process.env['GOOGLE_APPLICATION_CREDENTIALS'] ? { GOOGLE_APPLICATION_CREDENTIALS: process.env['GOOGLE_APPLICATION_CREDENTIALS']! } : {}),
+        ...(process.env['GOOGLE_CLOUD_PROJECT'] ? { GOOGLE_CLOUD_PROJECT: process.env['GOOGLE_CLOUD_PROJECT']! } : {}),
+      }),
+      timeout: config.narrator.mdSpeakTimeout,
+      cleanup: true,
+      killSignal: 'SIGKILL',
+    });
+    try {
+      await fs.access(mp3Path);
+      audioGenerated = true;
+      ttsChars = finalNarrative.length;
+    } catch (f3Err) {
+      console.warn('narrator: retry: mp3 not produced', { mp3Path, err: f3Err });
+      ttsFailReason = 'f3_silent';
+    }
+  } catch (err) {
+    console.error('narrator: retry: md-speak failed:', err);
+    const e = err as Record<string, unknown>;
+    if (e.timedOut === true) {
+      ttsFailReason = 'timeout';
+    } else {
+      const stderr = String(e.stderr ?? e.message ?? '');
+      ttsStderr = stderr.slice(0, 3800);
+      if (/google\.auth|credentials|PERMISSION_DENIED|quota|RESOURCE_EXHAUSTED/i.test(stderr)) {
+        ttsFailReason = 'gcp';
+      }
+    }
+  }
+
+  const truncatedWarning = stopReason === 'max_tokens' ? ' ⚠️ truncated (max_tokens — 12k cap)' : '';
+  const caption = `tone: ${tone} | shape: ${shape} | tts_chars: ${ttsChars}${truncatedWarning}`;
+  const keyboard = new InlineKeyboard().url('Read in Pocket Console', deepLink);
+
+  if (audioGenerated) {
+    const ttsUsd = (ttsChars / 1_000_000) * 16.0;
+    try {
+      db.prepare('UPDATE jobs SET tts_chars = ?, tts_usd = ?, tts_failed = 0 WHERE id = ?').run(ttsChars, ttsUsd, jobId);
+      try { recordSpend(db, userId, ttsUsd); } catch { /* non-fatal */ }
+    } catch { /* non-fatal */ }
+    await sendAudio(mp3Path, caption, keyboard, deepLink, ctx);
+  } else {
+    const timeoutSecs = Math.round(config.narrator.mdSpeakTimeout / 1000);
+    const partialMsg = buildTtsErrorMessage(ttsFailReason, timeoutSecs, ttsStderr);
+    const retryKeyboard = new InlineKeyboard()
+      .text('Retry audio', `retry_audio:${jobId}`)
+      .url('View text', deepLink);
+    const replyOpts: Parameters<typeof ctx.reply>[1] = { reply_markup: retryKeyboard };
+    if (ttsFailReason === 'gcp' && ttsStderr) (replyOpts as Record<string, unknown>)['parse_mode'] = 'HTML';
+    await ctx.reply(partialMsg, replyOpts);
   }
 }

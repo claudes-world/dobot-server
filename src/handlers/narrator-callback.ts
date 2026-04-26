@@ -2,6 +2,7 @@ import { Context } from 'grammy';
 import Database from 'better-sqlite3';
 import fs from 'node:fs/promises';
 import { pendingTimeouts } from './narrator.js';
+import { retryAudio } from '../delivery/narrator.js';
 
 interface PendingChoice {
   job_id: string;
@@ -108,5 +109,50 @@ export function createLengthCallbackHandler(
     // Invoke the continuation — pass tone/shape overrides directly so continueNarration
     // doesn't need to re-read the pending row (which is already deleted above).
     await onLengthChosen(jobId, length, ctx, pending.tone_prefix, pending.shape_prefix, pending.keyboard_msg_id);
+  };
+}
+
+export function createRetryAudioCallbackHandler(db: Database.Database) {
+  return async function retryAudioCallbackHandler(ctx: Context): Promise<void> {
+    const data = ctx.callbackQuery?.data;
+    if (!data?.startsWith('retry_audio:')) {
+      await ctx.answerCallbackQuery();
+      return;
+    }
+
+    const jobId = data.slice('retry_audio:'.length);
+    if (!jobId) {
+      await ctx.answerCallbackQuery({ text: 'Invalid retry request.' });
+      return;
+    }
+
+    type JobRow = { output_path: string | null; user_id: number; tone: string | null; shape: string | null; stop_reason: string | null };
+    const job = db.prepare(
+      'SELECT output_path, user_id, tone, shape, stop_reason FROM jobs WHERE id = ?'
+    ).get(jobId) as JobRow | undefined;
+
+    if (!job?.output_path) {
+      await ctx.answerCallbackQuery({ text: 'Job not found or already cleaned up.' });
+      return;
+    }
+
+    try {
+      await ctx.editMessageText('⏳ Retrying audio generation…');
+    } catch { /* swallow */ }
+
+    try {
+      await ctx.answerCallbackQuery();
+    } catch { /* non-fatal */ }
+
+    await retryAudio(
+      jobId,
+      job.user_id,
+      job.output_path,
+      job.tone ?? 'unknown',
+      job.shape ?? 'unknown',
+      job.stop_reason ?? 'end_turn',
+      ctx,
+      db,
+    );
   };
 }
