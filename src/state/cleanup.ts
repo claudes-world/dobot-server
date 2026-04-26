@@ -3,13 +3,15 @@ import type { UserFromGetMe, Update } from 'grammy/types';
 import Database from 'better-sqlite3';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { pendingTimeouts } from '../handlers/narrator.js';
+import { pendingTimeouts, pendingNarratorTimeouts } from '../handlers/narrator.js';
 
 interface PendingRow {
   job_id: string;
   chat_id: number;
   keyboard_msg_id: number;
   source_tmpfile: string;
+  tone_prefix: string | null;
+  shape_prefix: string | null;
   expires_at: number;
 }
 
@@ -72,11 +74,11 @@ export function rebuildPendingTimeouts(
   db: Database.Database,
   api: Api,
   me: UserFromGetMe,
-  onTimeout: (jobId: string, length: 'short' | 'medium' | 'full', ctx: Context) => Promise<void>,
+  onTimeout: (jobId: string, length: 'short' | 'medium' | 'full', ctx: Context, toneOverride: string | null, shapeOverride: string | null, ackMessageId?: number) => Promise<void>,
 ): void {
   const now = Date.now();
   const rows = db.prepare(
-    "SELECT job_id, chat_id, keyboard_msg_id, source_tmpfile, expires_at FROM pending_length_choices WHERE expires_at >= ?"
+    "SELECT job_id, chat_id, keyboard_msg_id, source_tmpfile, tone_prefix, shape_prefix, expires_at FROM pending_length_choices WHERE expires_at >= ?"
   ).all(now) as PendingRow[];
 
   for (const row of rows) {
@@ -85,8 +87,10 @@ export function rebuildPendingTimeouts(
     const handle = setTimeout(async () => {
       try {
         // Atomically consume — avoid double-fire with normal callback path
-        const still = db.prepare(`DELETE FROM pending_length_choices WHERE job_id = ? RETURNING *`).get(row.job_id);
+        const still = db.prepare(`DELETE FROM pending_length_choices WHERE job_id = ? RETURNING *`).get(row.job_id) as
+          | { tone_prefix: string | null; shape_prefix: string | null } | undefined;
         pendingTimeouts.delete(row.job_id);
+        pendingNarratorTimeouts.add(-1, { bot: 'narrator' });
         if (!still) return; // already handled by callback
 
         const { job_id: jobId, chat_id: chatId, keyboard_msg_id: ackMessageId } = row;
@@ -122,13 +126,14 @@ export function rebuildPendingTimeouts(
         };
 
         const ctx = new Context(syntheticUpdate, api, me);
-        await onTimeout(jobId, 'medium', ctx);
+        await onTimeout(jobId, 'medium', ctx, still.tone_prefix, still.shape_prefix, ackMessageId || undefined);
       } catch (err) {
         console.error(`rebuildPendingTimeouts: unhandled error in timeout for job ${row.job_id}:`, err);
       }
     }, delay);
 
     pendingTimeouts.set(row.job_id, handle);
+    pendingNarratorTimeouts.add(1, { bot: 'narrator' });
     console.log(`startup: rebuilt timeout for pending choice ${row.job_id} (fires in ${Math.round(delay / 1000)}s)`);
   }
 }

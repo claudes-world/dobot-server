@@ -1,5 +1,4 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { validateAndFetchUrl } from '../../src/lib/url-validator.js';
 
 // Mock dns/promises module
 vi.mock('node:dns/promises', () => ({
@@ -8,8 +7,22 @@ vi.mock('node:dns/promises', () => ({
   },
 }));
 
+// Mock undici — url-validator imports `fetch` from 'undici' so global stubGlobal
+// won't intercept calls. We mock the named export here. Agent is preserved as a
+// no-op constructor since the dispatcher is only used by fetch (which is mocked).
+vi.mock('undici', () => ({
+  Agent: class {
+    destroy() { return Promise.resolve(); }
+  },
+  fetch: vi.fn(),
+}));
+
 import dns from 'node:dns/promises';
+import { fetch as undiciFetch } from 'undici';
 const mockDnsLookup = dns.lookup as ReturnType<typeof vi.fn>;
+const mockUndiciFetch = undiciFetch as unknown as ReturnType<typeof vi.fn>;
+
+import { validateAndFetchUrl } from '../../src/lib/url-validator.js';
 
 // Helper to build a minimal Response-like object
 function makeResponse(opts: {
@@ -34,29 +47,27 @@ function makeResponse(opts: {
   return new Response(stream, { status, headers: headerMap });
 }
 
-// Stub global fetch
-let fetchStub: ReturnType<typeof vi.fn>;
+// Reference the mocked undici fetch
+const fetchStub = mockUndiciFetch;
 
 beforeEach(() => {
-  fetchStub = vi.fn();
-  vi.stubGlobal('fetch', fetchStub);
+  fetchStub.mockReset();
   mockDnsLookup.mockReset();
 });
 
 afterEach(() => {
-  vi.unstubAllGlobals();
   vi.clearAllMocks();
 });
 
 describe('validateAndFetchUrl', () => {
-  it('1. valid HTTPS URL — returns body', async () => {
+  it('1. valid HTTPS URL (text/plain) — returns raw body', async () => {
     mockDnsLookup.mockResolvedValue({ address: '93.184.216.34', family: 4 });
     fetchStub.mockResolvedValue(
-      makeResponse({ headers: { 'content-type': 'text/html' }, body: '<h1>Hello</h1>' })
+      makeResponse({ headers: { 'content-type': 'text/plain' }, body: 'Hello world' })
     );
 
     const result = await validateAndFetchUrl('https://example.com/page');
-    expect(result).toBe('<h1>Hello</h1>');
+    expect(result).toBe('Hello world');
   });
 
   it('2. HTTP URL — throws protocol error', async () => {
@@ -156,5 +167,69 @@ describe('validateAndFetchUrl', () => {
     await expect(validateAndFetchUrl('https://example.com/')).rejects.toThrow(
       /private IP address/
     );
+  });
+
+  // ipaddr.js upgrade tests (#56)
+
+  it('11. IPv6 loopback (::1) — throws private IP error', async () => {
+    mockDnsLookup.mockResolvedValue({ address: '::1', family: 6 });
+
+    await expect(validateAndFetchUrl('https://localhost6.test/')).rejects.toThrow(
+      /private IP address/
+    );
+  });
+
+  it('12. IPv6 ULA (fc00::/7) — throws private IP error', async () => {
+    mockDnsLookup.mockResolvedValue({ address: 'fc00::1', family: 6 });
+
+    await expect(validateAndFetchUrl('https://ula.test/')).rejects.toThrow(
+      /private IP address/
+    );
+  });
+
+  it('13. CGNAT address (100.64.0.1) — throws private IP error', async () => {
+    mockDnsLookup.mockResolvedValue({ address: '100.64.0.1', family: 4 });
+
+    await expect(validateAndFetchUrl('https://cgnat.test/')).rejects.toThrow(
+      /private IP address/
+    );
+  });
+
+  it('14. IPv4-mapped private IPv6 (::ffff:10.0.0.1) — throws private IP error', async () => {
+    mockDnsLookup.mockResolvedValue({ address: '::ffff:10.0.0.1', family: 6 });
+
+    await expect(validateAndFetchUrl('https://mapped.test/')).rejects.toThrow(
+      /private IP address/
+    );
+  });
+
+  it('15. HTML response — returns stripped text', async () => {
+    mockDnsLookup.mockResolvedValue({ address: '93.184.216.34', family: 4 });
+    fetchStub.mockResolvedValue(
+      makeResponse({
+        headers: { 'content-type': 'text/html' },
+        body: '<html><head><style>body{color:red}</style></head><body><h1>Hello</h1><p>World</p></body></html>',
+      })
+    );
+
+    const result = await validateAndFetchUrl('https://example.com/page');
+    expect(result).not.toContain('<');
+    expect(result).toContain('Hello');
+    expect(result).toContain('World');
+  });
+
+  it('16. HTML response with script block — script content removed', async () => {
+    mockDnsLookup.mockResolvedValue({ address: '93.184.216.34', family: 4 });
+    fetchStub.mockResolvedValue(
+      makeResponse({
+        headers: { 'content-type': 'text/html' },
+        body: '<p>Good</p><script>alert("xss")</script><p>Content</p>',
+      })
+    );
+
+    const result = await validateAndFetchUrl('https://example.com/page');
+    expect(result).not.toContain('alert');
+    expect(result).toContain('Good');
+    expect(result).toContain('Content');
   });
 });

@@ -1,0 +1,38 @@
+[
+  {
+    "handler": "idea-capture",
+    "match": { "chatId": -1003943548415, "threadId": 2 },
+    "context": { "repo": "/home/claude/claudes-world", "folder": "todo-cpc-world" },
+    "label": "TODO group — CPC World thread"
+  },
+  {
+    "handler": "idea-capture",
+    "match": { "chatId": -1003943548415, "threadId": 11 },
+    "context": { "repo": "/home/claude/claudes-world", "folder": "todo-omnipass" },
+    "label": "TODO group — OmniPass thread"
+  },
+  {
+    "handler": "idea-capture",
+    "match": { "chatId": -1003920610203, "threadId": 2 },
+    "context": { "repo": "/home/claude/claudes-world", "folder": "pulse-play-idea-capture" },
+    "label": "Pulse Play Corp — Idea Capture thread"
+  },
+  {
+    "handler": "idea-capture",
+    "match": { "chatId": -1003943548415 },
+    "context": { "repo": "/home/claude/claudes-world", "folder": "todo-general" },
+    "label": "TODO group — general fallback"
+  },
+  {
+    "handler": "idea-capture",
+    "match": { "chatId": -1003920610203 },
+    "context": { "repo": "/home/claude/claudes-world", "folder": "pulse-play-general" },
+    "label": "Pulse Play Corp — general fallback"
+  },
+  {
+    "handler": "idea-capture",
+    "match": { "userId": 1676859445, "chatType": "private" },
+    "context": { "repo": "/home/claude/claudes-world", "folder": "liam-dm" },
+    "label": "DMs from Liam"
+  }
+]
