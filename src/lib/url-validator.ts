@@ -1,6 +1,6 @@
 import dns from 'node:dns/promises';
 import ipaddr from 'ipaddr.js';
-import { Agent as UndiciAgent } from 'undici';
+import { Agent as UndiciAgent, fetch, type Response as UndiciResponse } from 'undici';
 import he from 'he';
 
 const ALLOWED_CONTENT_TYPES = ["text/html", "text/markdown", "text/plain"];
@@ -107,7 +107,7 @@ export async function validateAndFetchUrl(urlString: string): Promise<string> {
 
   let currentUrl = url.toString();
   let redirectCount = 0;
-  let response: Response;
+  let response: UndiciResponse;
 
   try {
     // lastDispatcher holds the dispatcher for the final (non-redirect) hop.
@@ -121,9 +121,10 @@ export async function validateAndFetchUrl(urlString: string): Promise<string> {
         const hopUrl = new URL(currentUrl);
         const resolvedIp = await resolveAndValidate(hopUrl.hostname);
 
-        // Pin the pre-resolved IP at socket level — undici will not re-resolve the hostname
+        // Pin the pre-resolved IP at socket level — undici will not re-resolve the hostname.
+        // undici 8.x changed the lookup callback contract to cb(null, [{ address, family }]).
         const dispatcher = new UndiciAgent({
-          connect: { lookup: (_hostname: string, _opts: unknown, cb: (err: Error | null, address: string, family: number) => void) => cb(null, resolvedIp, 4) }
+          connect: { lookup: (_hostname: string, _opts: unknown, cb: (err: Error | null, addresses: Array<{ address: string; family: number }>) => void) => cb(null, [{ address: resolvedIp, family: 4 }]) }
         });
 
         let isRedirect = false;
@@ -131,7 +132,6 @@ export async function validateAndFetchUrl(urlString: string): Promise<string> {
           response = await fetch(hopUrl.toString(), {
             signal: controller.signal,
             redirect: 'manual',
-            // @ts-expect-error — undici dispatcher is not in the standard fetch types but is supported by Node.js
             dispatcher,
           });
 
