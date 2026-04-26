@@ -4,6 +4,8 @@ import fs from 'node:fs/promises';
 import { pendingTimeouts } from './narrator.js';
 import { retryAudio } from '../delivery/narrator.js';
 
+const activeRetries = new Set<string>();
+
 interface PendingChoice {
   job_id: string;
   chat_id: number;
@@ -128,31 +130,41 @@ export function createRetryAudioCallbackHandler(db: Database.Database) {
 
     type JobRow = { output_path: string | null; user_id: number; tone: string | null; shape: string | null; stop_reason: string | null };
     const job = db.prepare(
-      'SELECT output_path, user_id, tone, shape, stop_reason FROM jobs WHERE id = ?'
-    ).get(jobId) as JobRow | undefined;
+      'SELECT output_path, user_id, tone, shape, stop_reason FROM jobs WHERE id = ? AND chat_id = ?'
+    ).get(jobId, ctx.chat!.id) as JobRow | undefined;
 
     if (!job?.output_path) {
       await ctx.answerCallbackQuery({ text: 'Job not found or already cleaned up.' });
       return;
     }
 
-    try {
-      await ctx.editMessageText('⏳ Retrying audio generation…');
-    } catch { /* swallow */ }
+    if (activeRetries.has(jobId)) {
+      await ctx.answerCallbackQuery({ text: 'Audio retry already in progress…' });
+      return;
+    }
+    activeRetries.add(jobId);
 
     try {
-      await ctx.answerCallbackQuery();
-    } catch { /* non-fatal */ }
+      try {
+        await ctx.editMessageText('⏳ Retrying audio generation…');
+      } catch { /* swallow */ }
 
-    await retryAudio(
-      jobId,
-      job.user_id,
-      job.output_path,
-      job.tone ?? 'unknown',
-      job.shape ?? 'unknown',
-      job.stop_reason ?? 'end_turn',
-      ctx,
-      db,
-    );
+      try {
+        await ctx.answerCallbackQuery();
+      } catch { /* non-fatal */ }
+
+      await retryAudio(
+        jobId,
+        job.user_id,
+        job.output_path,
+        job.tone ?? 'unknown',
+        job.shape ?? 'unknown',
+        job.stop_reason ?? 'end_turn',
+        ctx,
+        db,
+      );
+    } finally {
+      activeRetries.delete(jobId);
+    }
   };
 }

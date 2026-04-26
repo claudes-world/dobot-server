@@ -21,7 +21,9 @@ function buildTtsErrorMessage(reason: TtsFailReason, timeoutSecs: number, stderr
       return `✅ Narrative generated\n❌ Audio timed out — generation exceeded ${timeoutSecs}s and was cancelled.\n\nThe narrative may be unusually long. Try requesting a shorter version, or use the text below.`;
     case 'gcp': {
       const base = '✅ Narrative generated\n❌ Audio unavailable — TTS service error (authentication or quota issue).\n\nThis is a server-side problem, not your text. Retry in a few minutes or notify the operator.';
-      return stderr ? `${base}\n<blockquote expandable>${escapeHtml(stderr)}</blockquote>` : base;
+      if (!stderr) return base;
+      const escaped = escapeHtml(stderr).slice(0, 4000 - base.length - 40);
+      return `${base}\n<blockquote expandable>${escaped}</blockquote>`;
     }
     case 'f3_silent':
       return '✅ Narrative generated\n❌ Audio failed — TTS ran but produced no output file (possible ffmpeg or disk issue).\n\nText version below. Operator: check ffmpeg availability and disk space.';
@@ -159,7 +161,7 @@ export async function deliverNarration(opts: DeliveryOptions): Promise<void> {
       ttsFailReason = 'timeout';
     } else if (!/aborted|cancel/i.test(String(e.message ?? ''))) {
       const stderr = String(e.stderr ?? e.message ?? '');
-      ttsStderr = stderr.slice(0, 3800);
+      ttsStderr = stderr.slice(0, 1000);
       if (/google\.auth|credentials|PERMISSION_DENIED|quota|RESOURCE_EXHAUSTED/i.test(stderr)) {
         ttsFailReason = 'gcp';
       }
@@ -258,6 +260,9 @@ export async function retryAudio(
   let audioGenerated = false;
   let ttsChars = 0;
 
+  // Clear any stale mp3 from a previous run to prevent false-positive audioGenerated
+  try { await fs.unlink(mp3Path); } catch { /* not present */ }
+
   try {
     await execa('md-speak', ['--no-describe', mdPath], {
       extendEnv: false,
@@ -284,7 +289,7 @@ export async function retryAudio(
       ttsFailReason = 'timeout';
     } else {
       const stderr = String(e.stderr ?? e.message ?? '');
-      ttsStderr = stderr.slice(0, 3800);
+      ttsStderr = stderr.slice(0, 1000);
       if (/google\.auth|credentials|PERMISSION_DENIED|quota|RESOURCE_EXHAUSTED/i.test(stderr)) {
         ttsFailReason = 'gcp';
       }
